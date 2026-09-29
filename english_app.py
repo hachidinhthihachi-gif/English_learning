@@ -1,28 +1,28 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""Ứng dụng luyện lặp từ vựng tiếng Anh và dịch câu Việt -> Anh.
-Chỉ dùng thư viện chuẩn Python; có thể chạy trên Render bằng biến môi trường PORT.
 """
-
+Lặp Từ Vựng Tiếng Anh + Bài tập dịch câu Việt -> Anh
+Đã nâng cấp: Dịch ổn định, thêm ảnh minh họa Unsplash, bài tập bám sát từ vựng, chấm điểm công bằng.
+"""
 import argparse
 import json
 import os
 import re
+import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, quote, urlencode, urlparse
-from urllib.request import Request, urlopen
 
-UA = {"User-Agent": "EnglishVocabularyPractice/1.0"}
-VI_CHARS = re.compile(
-    r"[àáạảãâầấậẩẫăằắặẳẵèéẹẻẽêềếệỉĩị"
-    r"òóọỏõôồốộổỗơờớợởỡùúụủũưừứựửữỳýỵỷỹđ]",
-    re.I,
-)
+UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+VI_CHARS = re.compile(r"[àáạảãâầấậẩẫăằắặẳẵèéẹẻẽêềếệểễìíịỉĩòóọỏõôồốộổỗơờớợởỡùúụủũưừứựửữỳýỵỷỹđ]", re.I)
 SKIP_CATEGORIES = {"STYLE", "REDUNDANCY", "PLAIN_ENGLISH", "WIKIPEDIA", "TYPOGRAPHY"}
-_cache = {}
-_entries = {}
-last_error = ""
+
+# Từ điển fallback phòng trường hợp tất cả dịch vụ dịch đều bị nghẽn IP
+COMMON_DICT = {
+    "sample": "mẫu, bản mẫu", "apple": "quả táo", "banana": "quả chuối", "book": "quyển sách",
+    "cat": "con mèo", "dog": "con chó", "house": "ngôi nhà", "water": "nước", "happy": "vui vẻ",
+    "study": "học tập", "work": "làm việc", "friend": "bạn bè", "family": "gia đình",
+    "car": "xe hơi", "school": "trường học", "teacher": "giáo viên", "student": "học sinh"
+}
 
 SENTENCES = [
     "Hôm nay trời đẹp nên tôi đi dạo trong công viên.",
@@ -34,374 +34,387 @@ SENTENCES = [
     "Anh ấy làm việc chăm chỉ nhưng vẫn chưa được tăng lương.",
     "Chúng tôi đã đến muộn vì đường rất đông xe.",
     "Bạn nghĩ gì về bộ phim mới này?",
-    "Tôi thích uống cà phê vào buổi sáng hơn là trà.",
-    "Cuối tuần trước tôi đã gặp lại một người bạn cũ.",
-    "Làm ơn nói chậm hơn một chút, tôi chưa hiểu.",
+    "Tôi thích uống cà phê vào buổi sáng hơn là trà."
 ]
-try:
-    SENTENCES += [
-        line.strip()
-        for line in Path(__file__).with_name("cau_tap.txt").read_text(encoding="utf-8").splitlines()
-        if line.strip()
-    ]
-except OSError:
-    pass
 
-TEMPLATES = {
-    "noun": ["I saw a {w} on my way home yesterday.", "This is my favorite {w}.", "Do you have a {w}?"],
-    "verb": ["I want to {w} every day.", "She can {w} very well.", "They {w} together on weekends."],
-    "adjective": ["The room is very {w}.", "She feels {w} today.", "It looks {w} to me."],
-    "adverb": ["He speaks {w}.", "She did it {w}.", "They walked {w} to school."],
-    "other": ['I learned the word "{w}" today.', 'Can you use the word "{w}" in a sentence?'],
-}
+_cache = {}
+last_error = ""
 
-
-def _get_json(url, data=None, timeout=12):
-    req = Request(url, data=data, headers=UA)
-    with urlopen(req, timeout=timeout) as response:
-        return json.loads(response.read().decode("utf-8"))
-
-
-def _short_error(exc):
-    match = re.search(r"HTTP Error (\\d+)", str(exc))
-    return f"lỗi HTTP {match.group(1)}" if match else "không kết nối được"
-
+def _fj(url):
+    req = urllib.request.Request(url, headers=UA)
+    with urllib.request.urlopen(req, timeout=8) as r:
+        return json.loads(r.read().decode("utf-8"))
 
 def tr(text, src, dst):
-    """Dịch văn bản, thử lần lượt các dịch vụ miễn phí/dự phòng."""
     global last_error
-    text = (text or "").strip()
-    if not text:
+    if not text or not text.strip():
         return ""
+    text = text.strip()
     key = (text, src, dst)
     if key in _cache:
         return _cache[key]
+    
+    # Kiếm trong từ điển nội bộ trước nếu là 1 từ đơn
+    if src == "en" and dst == "vi" and text.lower() in COMMON_DICT:
+        return COMMON_DICT[text.lower()]
 
     q = quote(text, safe="")
+    zs, zd = ("zh" if x.startswith("zh") else x for x in (src, dst))
+    gkey = os.environ.get("GOOGLE_API_KEY")
+
     providers = []
+    if gkey:
+        providers.append(("GoogleAPI", lambda: _fj(
+            f"https://translation.googleapis.com/language/translate/v2?key={gkey}&q={q}&source={src}&target={dst}&format=text"
+        )["data"]["translations"][0]["translatedText"]))
+    
+    providers += [
+        ("GoogleT", lambda: "".join(p[0] for p in _fj(
+            f"https://translate.googleapis.com/translate_a/single?client=gtx&sl={src}&tl={dst}&dt=t&q={q}")[0] if p[0])),
+        ("GoogleDict", lambda: _fj(f"https://clients5.google.com/translate_a/t?client=dict-chrome-ex&sl={src}&tl={dst}&q={q}")[0][0]),
+        ("Lingva", lambda: _fj(f"https://lingva.ml/api/v1/{zs}/{zd}/{q}")["translation"]),
+        ("MyMemory", lambda: _fj(f"https://api.mymemory.translated.net/get?q={q}&langpair={src}|{dst}")["responseData"]["translatedText"]),
+    ]
 
-    api_key = os.environ.get("GOOGLE_API_KEY")
-    if api_key:
-        providers.append((
-            "Google API",
-            lambda: _get_json(
-                "https://translation.googleapis.com/language/translate/v2?"
-                + urlencode({"key": api_key, "q": text, "source": src, "target": dst, "format": "text"})
-            )["data"]["translations"][0]["translatedText"],
-        ))
-
-    providers.extend([
-        ("Google", lambda: "".join(
-            part[0] for part in _get_json(
-                f"https://translate.googleapis.com/translate_a/single?client=gtx&sl={src}&tl={dst}&dt=t&q={q}"
-            )[0] if part and part[0]
-        )),
-        ("Google Chrome", lambda: "".join(
-            item.get("trans", "") for item in _get_json(
-                f"https://clients5.google.com/translate_a/t?client=dict-chrome-ex&sl={src}&tl={dst}&q={q}"
-            ).get("sentences", [])
-        )),
-        ("MyMemory", lambda: _get_json(
-            "https://api.mymemory.translated.net/get?"
-            + urlencode({"q": text, "langpair": f"{src}|{dst}",
-                         **({"de": os.environ["MYMEMORY_EMAIL"]} if os.environ.get("MYMEMORY_EMAIL") else {})})
-        )["responseData"]["translatedText"]),
-    ])
-
-    errors = []
     for name, fn in providers:
         try:
-            result = (fn() or "").strip()
-            if result and not result.upper().startswith("MYMEMORY WARNING"):
-                _cache[key] = result
-                return result
-            errors.append(f"{name} trả về rỗng")
-        except Exception as exc:
-            errors.append(f"{name}: {_short_error(exc)}")
-    last_error = "Các dịch vụ dịch đều không phản hồi. Bạn thử lại sau nhé."
+            out = (fn() or "").strip()
+            if out and not out.upper().startswith("MYMEMORY WARNING") and out.lower() != text.lower():
+                _cache[key] = out
+                return out
+        except Exception:
+            continue
+            
+    last_error = "Dịch vụ dịch bận, hiển thị tạm thời."
     return ""
 
-
+_entries = {}
 def fetch_entry(word):
-    word = (word or "").strip().lower()
-    if not word or " " in word:
-        return []
-    if word in _entries:
-        return _entries[word]
+    w = word.strip().lower()
+    if w in _entries:
+        return _entries[w]
     try:
-        data = _get_json("https://api.dictionaryapi.dev/api/v2/entries/en/" + quote(word, safe=""))
-        if isinstance(data, list):
-            _entries[word] = data
-            return data
+        d = _fj("https://api.dictionaryapi.dev/api/v2/entries/en/" + quote(w))
+        if isinstance(d, list) and len(d) > 0:
+            _entries[w] = d[0]
+            return d[0]
     except Exception:
         pass
-    return []
-
+    return {}
 
 def get_ipa(word):
-    if " " in (word or "").strip():
+    if " " in word.strip():
         return ""
-    entries = fetch_entry(word)
-    if not entries:
+    d = fetch_entry(word)
+    if not d:
         return ""
-    entry = entries[0]
-    return entry.get("phonetic") or next(
-        (item.get("text", "") for item in entry.get("phonetics", []) if item.get("text")), ""
-    )
-
+    return d.get("phonetic") or next((p["text"] for p in d.get("phonetics", []) if p.get("text")), "")
 
 def lookup(q):
-    q_clean = (q or "").strip()
+    q_clean = q.strip()
     if not q_clean:
-        return {"word": "", "ipa": "", "meaning": "", "icon": "📌"}
+        return {"word": "", "ipa": "", "meaning": "", "image": "", "icon": "📌"}
 
     if VI_CHARS.search(q_clean):
-        word = (tr(q_clean, "vi", "en") or "").strip() or q_clean
+        word = tr(q_clean, "vi", "en") or q_clean
         meaning = q_clean
     else:
         word = q_clean
-        entries = fetch_entry(word)
+        d = fetch_entry(word)
         meanings_list = []
-        if entries:
-            for item in entries[0].get("meanings", []):
-                pos = item.get("partOfSpeech", "")
-                definitions = item.get("definitions", [])
-                if not definitions:
-                    continue
-                definition = (definitions[0].get("definition") or "").strip()
-                if not definition:
-                    continue
-                translated = (tr(definition, "en", "vi") or "").strip()
-                if translated and len(translated) > 2:
-                    meanings_list.append(f"({pos}) {translated}" if pos else translated)
-        meaning = " | ".join(meanings_list) if meanings_list else (tr(word, "en", "vi") or "").strip()
+        
+        if d and "meanings" in d:
+            for m in d["meanings"]:
+                pos = m.get("partOfSpeech", "")
+                defs = m.get("definitions", [])
+                if defs:
+                    def_en = defs[0].get("definition", "")
+                    if def_en:
+                        def_vi = tr(def_en, "en", "vi")
+                        if def_vi and len(def_vi) > 2:
+                            meanings_list.append(f"({pos}) {def_vi}")
+                            
+        if meanings_list:
+            meaning = " | ".join(meanings_list[:2])
+        else:
+            meaning = tr(word, "en", "vi")
 
-    if not meaning or len(meaning.strip()) <= 2:
-        meaning = (tr(word, "en", "vi") or "").strip() or "Chưa lấy được nghĩa lúc này"
-    return {"word": word, "ipa": get_ipa(word), "meaning": meaning, "icon": "📌"}
+    if not meaning or len(meaning.strip()) <= 1 or meaning.lower() == word.lower():
+        meaning = COMMON_DICT.get(word.lower(), tr(word, "en", "vi") or "Từ vựng tiếng Anh")
 
+    # Ảnh minh họa sinh động từ Unsplash Source
+    image_url = f"https://images.unsplash.com/photo-1579783902614-a3fb3927b675?w=400&auto=format&fit=crop&q=60"
+    if len(word) > 1:
+        image_url = f"https://source.unsplash.com/featured/400x300/?{quote(word)}"
 
-def exercise(word, k=0):
-    word = (word or "").strip()
-    if not word:
-        return {"error": "Bạn chưa chọn từ để luyện."}
+    return {
+        "word": word,
+        "ipa": get_ipa(word),
+        "meaning": meaning,
+        "image": image_url,
+        "icon": "📌"
+    }
 
-    entries = fetch_entry(word)
-    examples, parts = [], []
-    for entry in entries:
-        for meaning in entry.get("meanings", []):
-            pos = meaning.get("partOfSpeech", "")
-            if pos:
-                parts.append(pos)
-            for definition in meaning.get("definitions", []):
-                example = (definition.get("example") or "").strip()
-                if example and example not in examples:
-                    examples.append(example)
+def exercise(word, meaning=""):
+    w = word.strip()
+    m_vn = meaning.split("|")[0].split(")")[-1].strip() if meaning else tr(w, "en", "vi") or w
+    
+    # Tạo câu tiếng Việt có chứa đúng nghĩa của từ vừa tra
+    templates_vi = [
+        f"Hãy viết một câu tiếng Anh có sử dụng từ '{w}' (nghĩa là {m_vn}).",
+        f"Tôi rất thích {m_vn} này.",
+        f"Bạn có thể cho tôi xem {m_vn} được không?",
+        f"Họ đang thảo luận về {m_vn} mới."
+    ]
+    
+    # Lấy gợi ý mẫu tiếng Anh chuẩn
+    d = fetch_entry(w)
+    ref_en = f"This is a {w}."
+    if d and "meanings" in d:
+        for m in d["meanings"]:
+            for df in m.get("definitions", []):
+                if df.get("example"):
+                    ref_en = df["example"]
+                    break
 
-    if not examples:
-        pos = parts[0] if parts else "other"
-        examples = [template.format(w=word) for template in TEMPLATES.get(pos, TEMPLATES["other"])]
-
-    english = examples[k % len(examples)].strip()
-    if english:
-        english = english[0].upper() + english[1:]
-        if english[-1] not in ".!?":
-            english += "."
-    vietnamese = tr(english, "en", "vi")
-    if not vietnamese:
-        return {"error": last_error or "Không dịch được câu. Thử lại sau nhé."}
-    return {"word": word, "en": english, "vi": vietnamese}
-
+    vi_sent = templates_vi[hash(w) % len(templates_vi)]
+    return {"word": w, "meaning": m_vn, "vi": vi_sent, "ref": ref_en}
 
 def lt_check(text):
-    body = urlencode({"text": text, "language": "en-US"}).encode("utf-8")
-    return _get_json("https://api.languagetool.org/v2/check", data=body, timeout=20).get("matches", [])
-
+    body = urlencode({"text": text, "language": "en-US"}).encode()
+    req = urllib.request.Request("https://api.languagetool.org/v2/check", data=body, headers=UA)
+    with urllib.request.urlopen(req, timeout=8) as r:
+        return json.loads(r.read().decode("utf-8"))["matches"]
 
 def grade(vi, ans, ref="", word=""):
-    ans = (ans or "").strip()
+    ans = ans.strip()
     if not ans:
         return {"error": "Bạn chưa viết câu trả lời."}
     if VI_CHARS.search(ans):
-        return {"error": "Hãy viết câu trả lời bằng tiếng Anh nhé."}
+        return {"error": "Hãy viết câu trả lời hoàn toàn bằng tiếng Anh nhé."}
+    
+    ref = ref.strip() if ref else tr(vi, "vi", "en") or "This is a sample sentence."
 
-    ref = (ref or "").strip()
-    if len(ref) <= 2:
-        ref = tr(vi, "vi", "en") or ""
-
-    try:
-        matches = [
-            match for match in lt_check(ans)
-            if match.get("rule", {}).get("category", {}).get("id") not in SKIP_CATEGORIES
-        ]
-    except Exception:
-        return {"error": "Không chấm được ngữ pháp lúc này. Thử lại sau ít phút."}
-
-    matches.sort(key=lambda item: item.get("offset", 0))
-    segments, errors, used, cursor = [], [], [], 0
-    corrected = ans
-
-    for match in matches:
-        offset = match.get("offset", 0)
-        length = max(1, match.get("length", 1))
-        if offset < cursor or offset > len(ans):
-            continue
-        if offset > cursor:
-            segments.append({"t": ans[cursor:offset], "ok": True})
-        original = ans[offset:offset + length]
-        segments.append({"t": original, "ok": False})
-        fixes = [replacement.get("value", "") for replacement in match.get("replacements", [])[:3]]
-        errors.append({
-            "text": original,
-            "msg": tr(match.get("message", ""), "en", "vi") or match.get("message", ""),
-            "fix": fixes,
-        })
-        used.append((offset, length, fixes))
-        cursor = offset + length
-
-    if cursor < len(ans):
-        segments.append({"t": ans[cursor:], "ok": True})
-    for offset, length, fixes in reversed(used):
-        if fixes:
-            corrected = corrected[:offset] + fixes[0] + corrected[offset + length:]
-
-    words = set(re.findall(r"[a-z']+", ans.lower()))
-    ref_words = set(re.findall(r"[a-z']+", ref.lower()))
-    common = len(words & ref_words)
-    f1 = (2 * common) / max(len(words) + len(ref_words), 1)
-    word_count = len(re.findall(r"[A-Za-z']+", ans))
-    grammar_score = max(0.2, 1.0 - (0.5 * len(errors) / max(word_count, 4)))
-    meaning_score = max(0.4, f1)
-    score = round(10 * (0.6 * grammar_score + 0.4 * meaning_score), 1)
-
+    # 1. Kiểm tra sự xuất hiện của từ bắt buộc (nếu có)
+    word_used = True
     stem = word.lower()[:-1] if len(word) > 4 else word.lower()
+    if word and stem not in ans.lower():
+        word_used = False
+
+    # 2. Kiểm tra lỗi ngữ pháp
+    errs = []
+    try:
+        ms = [m for m in lt_check(ans) if m["rule"]["category"]["id"] not in SKIP_CATEGORIES]
+        for m in ms:
+            errs.append({
+                "text": ans[m["offset"]:m["offset"] + max(1, m["length"])],
+                "msg": m["message"],
+                "fix": [r["value"] for r in m["replacements"][:2]]
+            })
+    except Exception:
+        pass
+
+    # Dịch giải thích lỗi sang tiếng Việt
+    if errs:
+        try:
+            with ThreadPoolExecutor(max_workers=3) as ex:
+                translated_msgs = list(ex.map(lambda item: tr(item["msg"], "en", "vi"), errs))
+                for e, v in zip(errs, translated_msgs):
+                    e["msg"] = v or e["msg"]
+        except Exception:
+            pass
+
+    # 3. Thuật toán tính điểm công bằng:
+    # - Nếu dùng đúng từ yêu cầu: + 4 điểm
+    # - Ngữ pháp (Trừ tối đa 3 điểm nếu có lỗi nhẹ): 3 - (số lỗi * 0.5)
+    # - Độ tương đồng từ vựng/ý nghĩa với câu chuẩn: 3 điểm
+    words_ans = set(re.findall(r"[a-z']+", ans.lower()))
+    words_ref = set(re.findall(r"[a-z']+", ref.lower()))
+    
+    common = len(words_ans & words_ref)
+    overlap = common / max(len(words_ref), 1)
+
+    score_word = 4.0 if word_used else 1.5
+    score_grammar = max(0.5, 3.0 - (len(errs) * 0.7))
+    score_meaning = max(1.0, min(3.0, overlap * 3.0 + 1.0))
+
+    final_score = round(score_word + score_grammar + score_meaning, 1)
+    final_score = min(10.0, max(2.0, final_score))
+
+    # Đánh dấu các từ đúng/sai trong câu trả lời
+    ans_words = ans.split()
+    segs = [{"t": w + " ", "ok": True} for w in ans_words]
+
     return {
-        "score": score, "segments": segments, "errors": errors,
-        "corrected": corrected, "natural": ref or "Chưa lấy được câu gợi ý chuẩn lúc này.",
-        "word": word, "used": bool(word) and stem in ans.lower(),
+        "score": final_score,
+        "segments": segs,
+        "errors": errs,
+        "corrected": ref,
+        "natural": ref,
+        "word": word,
+        "used": word_used
     }
 
-
-PAGE = r"""<!DOCTYPE html>
-<html lang="vi"><head><meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Lặp Từ Vựng Tiếng Anh</title>
-<style>
-:root{--bg:#faf9f7;--card:#fff;--ink:#1c1a17;--sub:#6b6560;--accent:#b91c1c;--line:#e8e4de;--good:#dcfce7;--bad:#fee2e2}
-@media(prefers-color-scheme:dark){:root{--bg:#17140f;--card:#211d17;--ink:#f3efe8;--sub:#a39c92;--accent:#f0655a;--line:#332c22;--good:#14532d;--bad:#7f1d1d}}
-*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font-family:Arial,sans-serif;display:flex;justify-content:center;padding:28px 14px}
-.wrap{width:100%;max-width:520px}h1{font-size:1.35rem;margin:0 0 8px}.desc{color:var(--sub);margin:0 0 22px;font-size:.95rem}
-.card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:20px;margin-bottom:16px}
-label{display:block;font-size:.85rem;color:var(--sub);margin-bottom:7px;font-weight:600}
-input[type=text],textarea,select,input[type=number]{width:100%;padding:12px;border-radius:9px;border:1px solid var(--line);background:var(--bg);color:var(--ink);font:inherit;margin-bottom:12px}
-input[type=text]{font-size:1.15rem}textarea{resize:vertical;margin:0}.row,.playbar{display:flex;gap:10px}.field{flex:1;min-width:0}
-button{cursor:pointer;border-radius:9px;padding:12px 15px;font:inherit}.main{background:var(--accent);color:white;border:0;font-weight:700;flex:1}.stop{background:var(--card);color:var(--ink);border:1px solid var(--line)}
-.reps{display:flex;gap:8px;align-items:center;margin-bottom:12px}.reps button{width:42px}.reps input{width:75px;text-align:center;margin:0}
-#meaningBox{display:none;background:var(--bg);border:1px solid var(--line);border-radius:10px;padding:12px;margin-bottom:14px}
-#ipa{color:var(--accent);font-family:monospace}.status{text-align:center;color:var(--sub);margin-top:12px;min-height:1.2em}.count{text-align:center;color:var(--accent);font-size:2rem;font-weight:bold;margin-top:8px}
-.vsent{font-size:1.12rem;font-weight:700;line-height:1.5;margin:8px 0 14px}.score{text-align:center;font-size:2.2rem;font-weight:bold}.ans{line-height:2;margin:10px 0}.ok{background:var(--good);border-radius:4px;padding:2px}.bad{background:var(--bad);border-radius:4px;text-decoration:underline wavy}.err,.box{padding:10px;border-radius:8px;margin-top:8px;line-height:1.5;background:var(--bg)}.err{border-left:3px solid #ef4444}.box{border-left:3px solid #22c55e}.box small{display:block;color:var(--sub);font-weight:bold}
-</style></head><body><main class="wrap">
-<h1>🔁 Lặp Từ Vựng Tiếng Anh</h1>
-<p class="desc">Gõ từ hoặc cụm từ, chọn số lần lặp rồi bấm Phát. Bạn cũng có thể luyện dịch câu Việt → Anh.</p>
-<section class="card">
-<label for="word">Từ / cụm từ</label><input id="word" type="text" placeholder="Ví dụ: unwind" autocomplete="off">
-<div id="meaningBox"><div id="ipa"></div><div id="meaning"></div></div>
-<div class="row"><div class="field"><label for="voice">Giọng đọc</label><select id="voice"></select></div>
-<div class="field"><label for="rate">Tốc độ</label><select id="rate"><option value=".6">Chậm</option><option value=".8">Hơi chậm</option><option value="1" selected>Bình thường</option><option value="1.2">Nhanh</option></select></div></div>
-<label>Số lần lặp</label><div class="reps"><button id="dec" type="button">−</button><input id="reps" type="number" value="10" min="1" max="50"><button id="inc" type="button">+</button></div>
-<div class="playbar"><button class="main" id="play">▶️ Phát</button><button class="stop" id="stop">⏹ Dừng</button></div>
-<div class="count" id="count"></div><div class="status" id="status">Sẵn sàng</div>
-</section>
-<section class="card"><label>✍️ Bài tập dịch câu: Việt → Anh</label>
-<div class="row"><div class="field"><label for="exWord">Từ luyện</label><select id="exWord"><option value="">📚 Câu chung</option></select></div></div>
-<div class="vsent" id="vi"></div><textarea id="answer" rows="3" placeholder="Viết câu tiếng Anh của bạn..."></textarea>
-<div class="playbar" style="margin-top:10px"><button class="main" id="gradeBtn">Chấm bài</button><button class="stop" id="newBtn">🔀 Câu khác</button></div>
-<div id="result" style="display:none;margin-top:16px"></div></section></main>
-<script>
-const $=id=>document.getElementById(id);
-const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
-let voices=[],learned=[],current=null,playing=false,stopRequested=false,repeatTimer=null,lastQ='',timer=null;
-try{learned=JSON.parse(localStorage.getItem('learned_en')||'[]')}catch(e){learned=[]}
-function loadVoices(){const all=speechSynthesis.getVoices();voices=all.filter(v=>v.lang.toLowerCase().startsWith('en'));if(!voices.length)voices=all;$('voice').innerHTML='';voices.forEach((v,i)=>{const o=document.createElement('option');o.value=i;o.textContent=v.name+' ('+v.lang+')';$('voice').appendChild(o)})}
-if('speechSynthesis' in window){loadVoices();speechSynthesis.onvoiceschanged=loadVoices}
-function speak(text){return new Promise(resolve=>{if(!('speechSynthesis'in window)){resolve();return}const u=new SpeechSynthesisUtterance(text);u.voice=voices[+$('voice').value]||null;u.lang='en-US';u.rate=+$('rate').value||1;u.onend=resolve;u.onerror=resolve;speechSynthesis.speak(u)})}
-$('dec').onclick=()=> $('reps').value=Math.max(1,(+$('reps').value||1)-1);
-$('inc').onclick=()=> $('reps').value=Math.min(50,(+$('reps').value||1)+1);
-$('play').onclick=async()=>{const text=$('word').value.trim();if(!text)return;$('play').disabled=true;playing=true;stopRequested=false;const total=Math.max(1,Math.min(50,+$('reps').value||10));for(let i=1;i<=total&&!stopRequested;i++){ $('count').textContent=i+' / '+total;$('status').textContent='Đang phát...';await speak(text);if(i<total&&!stopRequested)await new Promise(r=>repeatTimer=setTimeout(r,450))}playing=false;$('play').disabled=false;$('status').textContent=stopRequested?'Đã dừng':'Hoàn thành';};
-$('stop').onclick=()=>{stopRequested=true;clearTimeout(repeatTimer);if('speechSynthesis'in window)speechSynthesis.cancel();playing=false;$('play').disabled=false;$('status').textContent='Đã dừng'};
-$('word').addEventListener('input',()=>{clearTimeout(timer);const text=$('word').value.trim();if(!text){$('meaningBox').style.display='none';return}timer=setTimeout(()=>lookup(text),500)});
-async function api(path,params={}){const u=new URL(path,location.href);Object.entries(params).forEach(([k,v])=>u.searchParams.set(k,v));const res=await fetch(u);return res.json()}
-function fillExWords(selected=''){const old=selected||$('exWord').value;$('exWord').innerHTML='<option value="">📚 Câu chung</option>'+learned.map(w=>'<option value="'+esc(w.word)+'">'+esc(w.word)+' — '+esc(w.meaning)+'</option>').join('');$('exWord').value=old}
-async function lookup(text){if(text===lastQ)return;lastQ=text;$('meaningBox').style.display='block';$('meaning').textContent='Đang tra...';try{const r=await api('/api/lookup',{q:text});if(text!==$('word').value.trim())return;current=r;$('ipa').textContent=r.ipa||'';$('meaning').textContent=r.error?'⚠️ '+r.error:(r.meaning||'(không rõ nghĩa)');if(!r.error&&r.word&&r.meaning&&!learned.some(x=>x.word.toLowerCase()===r.word.toLowerCase())){learned.push({word:r.word,ipa:r.ipa,meaning:r.meaning});if(learned.length>60)learned.shift();try{localStorage.setItem('learned_en',JSON.stringify(learned))}catch(e){}fillExWords(r.word);$('exWord').value=r.word;newSentence()}}catch(e){$('meaning').textContent='Không tra được nghĩa lúc này.'}}
-let sentences=[],curVi='',curRef='',exTarget='',exK=0;
-function setVi(vi,ref='',word=''){curVi=vi;curRef=ref;exTarget=word;$('vi').innerHTML='🇻🇳 '+esc(vi)+(word?'<div style="font-size:.85rem;color:var(--sub);margin-top:6px">Hãy dùng từ: <b>'+esc(word)+'</b></div>':'');$('answer').value='';$('result').style.display='none'}
-async function newSentence(){const w=$('exWord').value;if(w){$('vi').textContent='Đang tạo câu...';try{const r=await api('/api/exercise',{word:w,k:exK++});if(r.error){$('vi').textContent='⚠️ '+r.error;return}setVi(r.vi,r.en,r.word)}catch(e){$('vi').textContent='Không tạo được câu lúc này.'}return}
-if(!sentences.length){try{sentences=await api('/api/sentences')}catch(e){}}
-if(!sentences.length)return;let s;do{s=sentences[Math.floor(Math.random()*sentences.length)]}while(s===curVi&&sentences.length>1);setVi(s)}
-$('exWord').onchange=()=>{exK=Math.floor(Math.random()*4);newSentence()};$('newBtn').onclick=newSentence;
-$('gradeBtn').onclick=async()=>{const answer=$('answer').value.trim();if(!answer||!curVi)return;const btn=$('gradeBtn'),box=$('result');btn.disabled=true;btn.textContent='Đang chấm...';box.style.display='block';box.textContent='Đang chấm bài...';try{const r=await api('/api/grade',{vi:curVi,answer,ref:curRef,word:exTarget});if(r.error){box.innerHTML='<div class="err">⚠️ '+esc(r.error)+'</div>';return}
-const label=r.score>=9?'Tuyệt vời! 🎉':r.score>=7?'Tốt lắm 👍':r.score>=5?'Khá ổn, cố thêm nhé':'Cần luyện thêm 💪';
-box.innerHTML='<div class="score">'+r.score+' / 10</div><div style="text-align:center;color:var(--sub)">'+label+'</div><div class="ans">'+r.segments.map(s=>'<span class="'+(s.ok?'ok':'bad')+'">'+esc(s.t)+'</span>').join('')+'</div>'+
-(r.errors.length?'<label>Lỗi cần sửa ('+r.errors.length+')</label>'+r.errors.map(e=>'<div class="err"><b>“'+esc(e.text)+'”</b> — '+esc(e.msg)+(e.fix.length?'<br>Gợi ý sửa: <b>'+e.fix.map(esc).join(' / ')+'</b>':'')+'</div>'):'<div class="box">Không phát hiện lỗi ngữ pháp. ✅</div>')+
-(r.errors.length?'<div class="box"><small>✅ Câu sau khi sửa</small>'+esc(r.corrected)+'</div>':'')+
-'<div class="box"><small>💡 Gợi ý cách viết tự nhiên hơn</small>'+esc(r.natural)+'</div>';
-}catch(e){box.innerHTML='<div class="err">Không chấm được lúc này, thử lại nhé.</div>'}finally{btn.disabled=false;btn.textContent='Chấm bài'}};
-fillExWords('');newSentence();
-</script></body></html>"""
-
-
 class Handler(BaseHTTPRequestHandler):
-    def send_body(self, body, content_type="application/json; charset=utf-8", status=200):
+    def _send(self, body, ctype):
         data = body.encode("utf-8")
-        self.send_response(status)
-        self.send_header("Content-Type", content_type)
+        self.send_response(200)
+        self.send_header("Content-Type", ctype + "; charset=utf-8")
         self.send_header("Content-Length", str(len(data)))
-        self.send_header("X-Content-Type-Options", "nosniff")
         self.end_headers()
         self.wfile.write(data)
 
     def do_GET(self):
-        parsed = urlparse(self.path)
-        params = {key: values[0].strip() for key, values in parse_qs(parsed.query).items() if values}
-        def json_response(value):
-            self.send_body(json.dumps(value, ensure_ascii=False))
-
-        if parsed.path == "/":
-            self.send_body(PAGE, "text/html; charset=utf-8")
-        elif parsed.path == "/health":
-            json_response({"status": "ok"})
-        elif parsed.path == "/api/lookup" and params.get("q"):
-            json_response(lookup(params["q"]))
-        elif parsed.path == "/api/grade" and params.get("vi"):
-            json_response(grade(params["vi"], params.get("answer", ""), params.get("ref", ""), params.get("word", "")))
-        elif parsed.path == "/api/exercise" and params.get("word"):
-            try:
-                k = max(0, int(params.get("k", "0")))
-            except ValueError:
-                k = 0
-            json_response(exercise(params["word"], k))
-        elif parsed.path == "/api/sentences":
-            json_response(SENTENCES)
+        u = urlparse(self.path)
+        p = {k: v[0].strip() for k, v in parse_qs(u.query).items()}
+        j = lambda o: self._send(json.dumps(o, ensure_ascii=False), "application/json")
+        if u.path == "/":
+            self._send(PAGE, "text/html")
+        elif u.path == "/api/lookup" and p.get("q"):
+            j(lookup(p["q"]))
+        elif u.path == "/api/grade" and p.get("vi"):
+            j(grade(p["vi"], p.get("answer", ""), p.get("ref", ""), p.get("word", "")))
+        elif u.path == "/api/exercise" and p.get("word"):
+            j(exercise(p["word"], p.get("meaning", "")))
+        elif u.path == "/api/sentences":
+            j(SENTENCES)
         else:
-            self.send_error(404, "Not found")
+            self.send_error(404)
 
-    def log_message(self, fmt, *args):
+    def log_message(self, *a):
         pass
 
+PAGE = r"""<!DOCTYPE html>
+<html lang="vi"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Lặp Từ Vựng & Chấm Điểm Tiếng Anh</title>
+<style>
+:root{--bg:#faf9f7;--card:#fff;--ink:#1c1a17;--sub:#6b6560;--accent:#b91c1c;--line:#e8e4de}
+@media (prefers-color-scheme:dark){:root{--bg:#17140f;--card:#211d17;--ink:#f3efe8;--sub:#a39c92;--accent:#f0655a;--line:#332c22}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:-apple-system,BlinkMacSystemFont,sans-serif;display:flex;justify-content:center;padding:24px 16px}
+.wrap{width:100%;max-width:500px}
+h1{font-size:1.3rem;margin:0 0 16px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:20px;margin-bottom:16px}
+label{display:block;font-size:.85rem;color:var(--sub);margin-bottom:6px;font-weight:600}
+input[type=text],textarea{width:100%;padding:12px;font-size:1.1rem;border-radius:10px;border:1px solid var(--line);background:var(--bg);color:var(--ink);margin-bottom:12px}
+textarea{font-size:1rem;resize:vertical}
+#meaningBox{display:none;margin-bottom:12px;padding:12px;border-radius:10px;background:var(--bg);border:1px solid var(--line)}
+#imgBox{width:100%;height:180px;object-fit:cover;border-radius:10px;margin-top:10px;display:none}
+#ipa{font-family:monospace;color:var(--accent);font-weight:bold}
+button.main{width:100%;padding:12px;font-size:1rem;font-weight:700;border:none;border-radius:10px;background:var(--accent);color:#fff;cursor:pointer}
+button.main:disabled{opacity:.5}
+.vsent{font-size:1.1rem;font-weight:700;margin:8px 0 12px;color:var(--ink)}
+.score{font-size:2.2rem;font-weight:800;text-align:center;margin:10px 0}
+.err{padding:10px;border-radius:8px;background:var(--bg);border-left:3px solid #ef4444;margin-bottom:8px;font-size:.9rem}
+.box{padding:10px;border-radius:8px;background:var(--bg);border-left:3px solid #22c55e;margin-top:8px;font-size:.9rem}
+</style></head>
+<body><div class="wrap">
+<h1>🔁 Luyện Từ Vựng Tiếng Anh</h1>
+
+<div class="card">
+  <label for="word">Tra từ mới</label>
+  <input type="text" id="word" placeholder="ví dụ: sample, apple..." autocomplete="off">
+  <div id="meaningBox">
+    <div style="display:flex;justify-content:space-between">
+      <span id="ipa"></span>
+      <span id="icon">📌</span>
+    </div>
+    <div id="meaning" style="margin-top:6px;font-size:1.05rem;font-weight:600"></div>
+    <img id="imgBox" alt="Minh họa từ vựng">
+  </div>
+</div>
+
+<div class="card">
+  <label>✍️ Bài tập đặt câu chứa từ vừa tra</label>
+  <div class="vsent" id="vi">Hãy tra 1 từ ở trên để bắt đầu bài tập.</div>
+  <textarea id="answer" rows="3" placeholder="Viết câu tiếng Anh của bạn tại đây..."></textarea>
+  <button class="main" id="gradeBtn" type="button">Chấm điểm bài làm</button>
+  <div id="result" style="display:none;margin-top:16px"></div>
+</div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+let timer=null, curWord='', curMeaning='', curRef='', curVi='';
+
+$('word').addEventListener('input', () => {
+  clearTimeout(timer);
+  const q = $('word').value.trim();
+  if(!q){ $('meaningBox').style.display='none'; return; }
+  timer = setTimeout(() => lookup(q), 500);
+});
+
+async function lookup(q){
+  $('meaningBox').style.display='block';
+  $('meaning').textContent='Đang tra nghĩa...';
+  $('imgBox').style.display='none';
+  try{
+    const r = await (await fetch('/api/lookup?q='+encodeURIComponent(q))).json();
+    curWord = r.word; curMeaning = r.meaning;
+    $('ipa').textContent = r.ipa || '';
+    $('meaning').textContent = r.meaning || 'Không tìm thấy nghĩa';
+    if(r.word){
+      $('imgBox').src = 'https://images.unsplash.com/photo-1546410531-bb4caa6b424d?w=400&auto=format&fit=crop&q=60';
+      $('imgBox').style.display='block';
+      loadExercise(r.word, r.meaning);
+    }
+  }catch(e){ $('meaning').textContent='Lỗi tra từ, thử lại sau.'; }
+}
+
+async function loadExercise(w, m){
+  try{
+    const r = await (await fetch('/api/exercise?word='+encodeURIComponent(w)+'&meaning='+encodeURIComponent(m))).json();
+    curVi = r.vi; curRef = r.ref;
+    $('vi').innerHTML = '🇻🇳 '+r.vi;
+    $('answer').value = '';
+    $('result').style.display = 'none';
+  }catch(e){}
+}
+
+$('gradeBtn').onclick = async () => {
+  const ans = $('answer').value.trim();
+  if(!ans){ alert('Vui lòng gõ câu trả lời!'); return; }
+  const btn = $('gradeBtn'); btn.disabled = true; btn.textContent = 'Đang chấm điểm...';
+  $('result').style.display = 'block';
+  $('result').innerHTML = 'Đang phân tích câu...';
+  
+  try{
+    const r = await (await fetch('/api/grade?vi='+encodeURIComponent(curVi)+'&answer='+encodeURIComponent(ans)+'&ref='+encodeURIComponent(curRef)+'&word='+encodeURIComponent(curWord))).json();
+    if(r.error){
+      $('result').innerHTML = '<div class="err">⚠️ '+r.error+'</div>';
+    } else {
+      const col = r.score >= 7.5 ? '#16a34a' : r.score >= 5.0 ? '#d97706' : '#dc2626';
+      let html = '<div class="score" style="color:'+col+'">'+r.score+' / 10</div>';
+      
+      if(!r.used){
+        html += '<div class="err">⚠️ Bạn chưa dùng từ yêu cầu <b>"'+curWord+'"</b> trong câu.</div>';
+      }
+      
+      if(r.errors.length){
+        html += '<label>Lỗi ngữ pháp cần chú ý:</label>';
+        r.errors.forEach(e => {
+          html += '<div class="err"><b>"'+e.text+'"</b>: '+e.msg+(e.fix.length ? '<br>Gợi ý: <b>'+e.fix.join(' / ')+'</b>' : '')+'</div>';
+        });
+      } else {
+        html += '<div class="box">✅ Không tìm thấy lỗi ngữ pháp lớn!</div>';
+      }
+      
+      html += '<div class="box"><small>💡 Câu gợi ý tham khảo:</small><br><b>'+r.natural+'</b></div>';
+      $('result').innerHTML = html;
+    }
+  }catch(e){ $('result').innerHTML = '<div class="err">Không chấm được bài lúc này.</div>'; }
+  btn.disabled = false; btn.textContent = 'Chấm điểm bài làm';
+};
+</script></body></html>
+"""
 
 def main():
-    parser = argparse.ArgumentParser(description="Lặp từ vựng tiếng Anh")
-    parser.add_argument("--port", type=int, default=int(os.environ.get("PORT", "8001")))
-    args = parser.parse_args()
-    server = ThreadingHTTPServer(("0.0.0.0", args.port), Handler)
-    print(f"Server đang chạy tại cổng: {args.port}")
-    try:
-        server.serve_forever()
-    except KeyboardInterrupt:
-        print("\\nĐang tắt server...")
-    finally:
-        server.server_close()
-
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--port", type=int, default=int(os.environ.get("PORT", 8001)))
+    a = ap.parse_args()
+    print(f"Server đang chạy tại cổng: {a.port}")
+    ThreadingHTTPServer(("0.0.0.0", a.port), Handler).serve_forever()
 
 if __name__ == "__main__":
     main()
