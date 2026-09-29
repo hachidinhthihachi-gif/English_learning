@@ -5,7 +5,7 @@ def grade(vi, ans, ref="", word=""):
     if VI_CHARS.search(ans):
         return {"error": "Hãy viết câu trả lời bằng tiếng Anh nhé."}
     
-    # 1. Đảm bảo câu tham khảo (natural) không bị rỗng hay lỗi ký tự lẻ (như "S")
+    # 1. Đảm bảo câu tham khảo (natural) không bị rỗng hay lỗi ký tự lẻ
     ref = ref.strip() if ref else ""
     if not ref or len(ref) <= 2:
         try:
@@ -37,14 +37,15 @@ def grade(vi, ans, ref="", word=""):
     if cur < len(ans):
         segs.append({"t": ans[cur:], "ok": True})
         
-    # Dịch lời giải thích lỗi sang tiếng Việt (Bọc try-except tránh sập server Render)
+    # Khối dịch lỗi được định dạng thụt lề chuẩn xác
     if errs:
         try:
             with ThreadPoolExecutor(max_workers=3) as ex:
-                for e, v in zip(errs, ex.map(lambda item: tr(item["msg"], "en", "vi"), errs)):
+                translated_msgs = list(ex.map(lambda item: tr(item["msg"], "en", "vi"), errs))
+                for e, v in zip(errs, translated_msgs):
                     e["msg"] = v or e["msg"]
         except Exception:
-            pass # Nếu lỗi dịch thì giữ nguyên câu tiếng Anh của LanguageTool
+            pass
             
     for o, l, fx in reversed(used):
         if fx:
