@@ -54,29 +54,58 @@ def _open(url, data=None):
         return json.loads(r.read().decode("utf-8"))
 
 
+def _fj(url):
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    with urllib.request.urlopen(req, timeout=10) as r:
+        return json.loads(r.read().decode("utf-8"))
+
+
+def _short(e):
+    m = re.search(r"HTTP Error (\d+)", str(e))
+    return "lỗi " + m.group(1) if m else "không kết nối được"
+
+
 def tr(text, src, dst):
-    """Dịch: Google (gtx) trước, lỗi thì MyMemory. Có nhớ kết quả."""
+    """Dịch với nhiều dịch vụ dự phòng: Google API (nếu có key) -> Google -> Google2 -> Lingva -> MyMemory."""
     global last_error
     key = (text, src, dst)
     if key in _cache:
         return _cache[key]
-    q, out = quote(text), ""
-    try:
-        d = _open(f"https://translate.googleapis.com/translate_a/single?client=gtx&sl={src}&tl={dst}&dt=t&q={q}")
-        out = "".join(p[0] for p in d[0] if p[0]).strip()
-    except Exception as e:
-        last_error = f"Google: {e}"
-        print("  ! Lỗi dịch (Google):", e)
-    if not out:
+    q = quote(text, safe="")
+    zs, zd = ("zh" if x.startswith("zh") else x for x in (src, dst))
+    gkey, email = os.environ.get("GOOGLE_API_KEY"), os.environ.get("MYMEMORY_EMAIL")
+
+    def google2():
+        d = _fj(f"https://clients5.google.com/translate_a/t?client=dict-chrome-ex&sl={src}&tl={dst}&q={q}")
+        return "".join(s["trans"] for s in d["sentences"]) if isinstance(d, dict) else d[0][0]
+
+    providers = []
+    if gkey:
+        providers.append(("GoogleAPI", lambda: _fj(
+            f"https://translation.googleapis.com/language/translate/v2?key={gkey}&q={q}&source={src}&target={dst}&format=text"
+        )["data"]["translations"][0]["translatedText"]))
+    providers += [
+        ("Google", lambda: "".join(p[0] for p in _fj(
+            f"https://translate.googleapis.com/translate_a/single?client=gtx&sl={src}&tl={dst}&dt=t&q={q}")[0] if p[0])),
+        ("Google2", google2),
+        ("Lingva", lambda: _fj(f"https://lingva.ml/api/v1/{zs}/{zd}/{q}")["translation"]),
+        ("MyMemory", lambda: _fj(f"https://api.mymemory.translated.net/get?q={q}&langpair={src}|{dst}"
+                                 + (f"&de={quote(email)}" if email else ""))["responseData"]["translatedText"]),
+    ]
+    errs = []
+    for name, fn in providers:
         try:
-            d = _open(f"https://api.mymemory.translated.net/get?q={q}&langpair={src}|{dst}")
-            out = (d.get("responseData", {}).get("translatedText") or "").strip()
+            out = (fn() or "").strip()
         except Exception as e:
-            last_error = f"MyMemory: {e}"
-            print("  ! Lỗi dịch (MyMemory):", e)
-    if out:
-        _cache[key] = out
-    return out
+            errs.append(f"{name} {_short(e)}")
+            continue
+        if out and not out.upper().startswith("MYMEMORY WARNING"):
+            _cache[key] = out
+            return out
+        errs.append(f"{name} hết hạn mức" if out else f"{name} trả về rỗng")
+    last_error = "Các dịch vụ dịch đều lỗi (" + ", ".join(errs) + "). Thử lại sau ít phút."
+    print("  !", last_error)
+    return ""
 
 
 _entries = {}
