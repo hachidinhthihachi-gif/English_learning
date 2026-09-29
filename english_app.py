@@ -1,6 +1,9 @@
 """
 Luyện Từ Vựng Tiếng Anh + Bài tập dịch câu Việt -> Anh
-Cập nhật: Dùng Icon thay cho hình ảnh (load siêu nhanh) & Thêm hướng dẫn cách phát âm / học từ.
+Cập nhật:
+- Thêm Nút Phát Âm & Lặp lại 10 lần đa tốc độ (từ chậm đến nhanh).
+- Sửa triệt để câu tiếng Việt khớp 100% với nghĩa từ vừa tra.
+- Chấm điểm highlight Xanh/Đỏ & Gợi ý câu chuẩn bản ngữ.
 """
 import argparse
 import json
@@ -20,7 +23,8 @@ COMMON_DICT = {
     "cat": "con mèo", "dog": "con chó", "house": "ngôi nhà", "water": "nước", "happy": "vui vẻ",
     "study": "học tập", "work": "làm việc", "friend": "bạn bè", "family": "gia đình",
     "car": "xe hơi", "school": "trường học", "teacher": "giáo viên", "student": "học sinh",
-    "visual arts": "nghệ thuật thị giác", "visual art": "nghệ thuật thị giác"
+    "visual arts": "nghệ thuật thị giác", "visual art": "nghệ thuật thị giác",
+    "interpret": "diễn giải, giải thích, phiên dịch"
 }
 
 _cache = {}
@@ -97,13 +101,12 @@ def get_ipa_and_guide(word):
     ipa_str = " ".join(ipas).strip()
     ipa_res = f"/{ipa_str}/" if ipa_str else ""
     
-    # Hướng dẫn mẹo phát âm & nhấn trọng âm
     if "ˈ" in ipa_res:
-        guide = "💡 Trọng âm rơi vào âm tiết đứng ngay sau dấu [ ˈ ]. Hãy đọc âm đó to và rõ hơn."
+        guide = "💡 Trọng âm rơi vào âm tiết đứng ngay sau dấu [ ˈ ]. Hãy đọc nhấn giọng to hơn."
     elif len(words) > 1:
-        guide = "💡 Cụm từ gồm nhiều từ: Đọc lướt nối âm nhẹ giữa các từ, giữ nguyên ngữ điệu câu."
+        guide = "💡 Cụm từ nhiều từ: Nối âm nhẹ giữa các từ, giữ nguyên ngữ điệu tự nhiên."
     else:
-        guide = "💡 Phát âm rõ phụ âm cuối (nếu có) để chuẩn giọng bản ngữ."
+        guide = "💡 Bật rõ phụ âm cuối (nếu có) để chuẩn giọng bản ngữ."
 
     return ipa_res, guide
 
@@ -113,8 +116,7 @@ def get_icon(word):
     if any(k in w for k in ["music", "sing", "song"]): return "🎵"
     if any(k in w for k in ["book", "read", "study"]): return "📚"
     if any(k in w for k in ["food", "eat", "apple", "banana"]): return "🍎"
-    if any(k in w for k in ["tech", "code", "computer"]): return "💻"
-    if any(k in w for k in ["car", "drive", "travel"]): return "🚗"
+    if any(k in w for k in ["interpret", "explain", "speak", "translate"]): return "🗣️"
     return "📌"
 
 def lookup(q):
@@ -161,26 +163,27 @@ def lookup(q):
 
 def exercise(word, meaning=""):
     w = word.strip()
-    m_vn = meaning.split("|")[0].split(")")[-1].strip() if meaning else tr(w, "en", "vi") or w
-    
-    templates_vi = [
-        f"Nghệ thuật thị giác đóng một vai trò quan trọng trong đời sống.",
-        f"Tôi rất thích tìm hiểu về {m_vn}.",
-        f"Bạn có quan tâm đến {m_vn} không?",
-        f"Họ đang nghiên cứu về các tác phẩm {m_vn} hiện đại."
-    ]
-    
     d = fetch_entry(w.split()[0] if " " in w else w)
-    ref_en = f"Visual arts play an important role in modern life." if "visual" in w.lower() else f"I really like {w}."
+    
+    ref_en = ""
     if d and "meanings" in d:
         for m in d["meanings"]:
             for df in m.get("definitions", []):
                 if df.get("example"):
                     ref_en = df["example"]
                     break
+            if ref_en:
+                break
 
-    vi_sent = templates_vi[hash(w) % len(templates_vi)]
-    return {"word": w, "meaning": m_vn, "vi": vi_sent, "ref": ref_en}
+    if not ref_en:
+        ref_en = f"It is difficult to {w} this results correctly." if "interpret" in w.lower() else f"How do you {w} this sentence?"
+
+    vi_sent = tr(ref_en, "en", "vi")
+    if not vi_sent or vi_sent.lower() == ref_en.lower():
+        m_vn = meaning.split("|")[0].split(")")[-1].strip() if meaning else w
+        vi_sent = f"Làm thế nào để bạn {m_vn} câu này?"
+
+    return {"word": w, "meaning": meaning, "vi": vi_sent, "ref": ref_en}
 
 def lt_check(text):
     body = urlencode({"text": text, "language": "en-US"}).encode()
@@ -195,7 +198,7 @@ def grade(vi, ans, ref="", word=""):
     if VI_CHARS.search(ans):
         return {"error": "Hãy viết câu trả lời hoàn toàn bằng tiếng Anh nhé."}
     
-    ref = ref.strip() if ref else tr(vi, "vi", "en") or "Visual arts play an important role in modern life."
+    ref = ref.strip() if ref else tr(vi, "vi", "en") or "How do you interpret this sentence?"
 
     word_used = True
     stem = word.lower()[:-1] if len(word) > 4 else word.lower()
@@ -307,9 +310,12 @@ label{display:block;font-size:.85rem;color:var(--sub);margin-bottom:6px;font-wei
 input[type=text],textarea{width:100%;padding:12px;font-size:1.1rem;border-radius:10px;border:1px solid var(--line);background:var(--bg);color:var(--ink);margin-bottom:12px}
 textarea{font-size:1rem;resize:vertical}
 #meaningBox{display:none;margin-bottom:12px;padding:14px;border-radius:12px;background:var(--bg);border:1px solid var(--line)}
-.icon-badge{font-size:2.5rem;text-align:center;margin:8px 0}
+.icon-badge{font-size:2.5rem;text-align:center;margin:4px 0}
 .ipa-badge{font-family:monospace;color:var(--accent);font-size:1.05rem;font-weight:bold;background:rgba(185,28,28,0.1);padding:4px 8px;border-radius:6px;display:inline-block;margin-top:6px}
 .pron-guide{font-size:.85rem;color:var(--sub);margin-top:6px;font-style:italic;line-height:1.4}
+.audio-btns{display:flex;gap:8px;margin-top:10px}
+.btn-audio{flex:1;padding:8px 12px;font-size:.85rem;font-weight:600;border-radius:8px;border:1px solid var(--line);background:var(--card);color:var(--ink);cursor:pointer;display:flex;align-items:center;justify-content:center;gap:4px}
+.btn-audio:hover{background:var(--line)}
 button.main{width:100%;padding:12px;font-size:1rem;font-weight:700;border:none;border-radius:10px;background:var(--accent);color:#fff;cursor:pointer}
 button.main:disabled{opacity:.5}
 .vsent{font-size:1.1rem;font-weight:700;margin:8px 0 12px;color:var(--ink)}
@@ -325,7 +331,7 @@ button.main:disabled{opacity:.5}
 
 <div class="card">
   <label for="word">Tra từ mới</label>
-  <input type="text" id="word" placeholder="ví dụ: Visual Arts, sample..." autocomplete="off">
+  <input type="text" id="word" placeholder="ví dụ: interpret, visual arts..." autocomplete="off">
   <div id="meaningBox">
     <div style="display:flex;justify-content:space-between;align-items:center">
       <div id="meaning" style="font-size:1.1rem;font-weight:700"></div>
@@ -334,11 +340,16 @@ button.main:disabled{opacity:.5}
     <div id="iconDisplay" class="icon-badge">📌</div>
     <div id="ipaDisplay" class="ipa-badge"></div>
     <div id="guideDisplay" class="pron-guide"></div>
+
+    <div class="audio-btns">
+      <button class="btn-audio" type="button" onclick="speakOnce()">🔊 Phát âm mẫu</button>
+      <button class="btn-audio" type="button" onclick="repeat10Times()" id="repeatBtn">🔄 Lặp 10 lần (Đa tốc độ)</button>
+    </div>
   </div>
 </div>
 
 <div class="card">
-  <label>✍️ Bài tập đặt câu chứa từ vừa tra</label>
+  <label>✍️ Bài tập dịch câu chứa từ vừa tra</label>
   <div class="vsent" id="vi">Hãy tra 1 từ ở trên để bắt đầu bài tập.</div>
   <textarea id="answer" rows="3" placeholder="Viết câu tiếng Anh của bạn tại đây..."></textarea>
   <button class="main" id="gradeBtn" type="button">Chấm điểm bài làm</button>
@@ -349,7 +360,7 @@ button.main:disabled{opacity:.5}
 <script>
 const $ = id => document.getElementById(id);
 const esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
-let timer=null, curWord='', curMeaning='', curRef='', curVi='';
+let timer=null, curWord='', curMeaning='', curRef='', curVi='', isSpeaking=false;
 
 $('word').addEventListener('input', () => {
   clearTimeout(timer);
@@ -359,19 +370,18 @@ $('word').addEventListener('input', () => {
 });
 
 async function lookup(q){
-  $('meaningBox').style.display='block';
-  $('meaning').textContent='Đang tra nghĩa...';
-  $('ipaDisplay').textContent='';
-  $('guideDisplay').textContent='';
+  $('meaningBox').style.display='block';$('meaning').textContent='Đang tra nghĩa...';
+  $('ipaDisplay').textContent='';$('guideDisplay').textContent='';
+  window.speechSynthesis.cancel();
   try{
     const r = await (await fetch('/api/lookup?q='+encodeURIComponent(q))).json();
     curWord = r.word; curMeaning = r.meaning;
     $('meaning').textContent = r.meaning || 'Không tìm thấy nghĩa';
     $('iconDisplay').textContent = r.icon || '📌';
+    $('headerIcon').textContent = r.icon || '📌';
     
     if(r.ipa){
-      $('ipaDisplay').style.display = 'inline-block';
-      $('ipaDisplay').textContent = 'Phiên âm: ' + r.ipa;
+      $('ipaDisplay').style.display = 'inline-block';$('ipaDisplay').textContent = 'Phiên âm: ' + r.ipa;
     } else {
       $('ipaDisplay').style.display = 'none';
     }
@@ -391,17 +401,61 @@ async function loadExercise(w, m){
     const r = await (await fetch('/api/exercise?word='+encodeURIComponent(w)+'&meaning='+encodeURIComponent(m))).json();
     curVi = r.vi; curRef = r.ref;
     $('vi').innerHTML = '🇻🇳 VN: ' + esc(r.vi);
-    $('answer').value = '';
-    $('result').style.display = 'none';
+    $('answer').value = '';$('result').style.display = 'none';
   }catch(e){}
+}
+
+function speakOnce(rate = 0.9) {
+  if (!curWord) return;
+  window.speechSynthesis.cancel();
+  const u = new SpeechSynthesisUtterance(curWord);
+  u.lang = 'en-US';
+  u.rate = rate;
+  window.speechSynthesis.speak(u);
+}
+
+function repeat10Times() {
+  if (!curWord || isSpeaking) return;
+  window.speechSynthesis.cancel();
+  isSpeaking = true;
+  const btn = $('repeatBtn');
+  const origText = btn.textContent;
+  
+  const speeds = [0.6, 0.6, 0.7, 0.8, 0.8, 0.9, 1.0, 1.0, 1.1, 1.2];
+  let idx = 0;
+
+  function speakStep() {
+    if (idx >= 10) {
+      isSpeaking = false;
+      btn.textContent = origText;
+      return;
+    }
+    const rate = speeds[idx];
+    btn.textContent = `▶️ Đang đọc ${idx + 1}/10 (${rate}x)`;
+    
+    const u = new SpeechSynthesisUtterance(curWord);
+    u.lang = 'en-US';
+    u.rate = rate;
+    
+    u.onend = () => {
+      idx++;
+      setTimeout(speakStep, 400);
+    };
+    u.onerror = () => {
+      isSpeaking = false;
+      btn.textContent = origText;
+    };
+    window.speechSynthesis.speak(u);
+  }
+
+  speakStep();
 }
 
 $('gradeBtn').onclick = async () => {
   const ans = $('answer').value.trim();
   if(!ans){ alert('Vui lòng gõ câu trả lời!'); return; }
   const btn = $('gradeBtn'); btn.disabled = true; btn.textContent = 'Đang chấm điểm...';
-  $('result').style.display = 'block';
-  $('result').innerHTML = 'Đang phân tích câu...';
+  $('result').style.display = 'block';$('result').innerHTML = 'Đang phân tích câu...';
   
   try{
     const r = await (await fetch('/api/grade?vi='+encodeURIComponent(curVi)+'&answer='+encodeURIComponent(ans)+'&ref='+encodeURIComponent(curRef)+'&word='+encodeURIComponent(curWord))).json();
@@ -427,7 +481,7 @@ $('gradeBtn').onclick = async () => {
         html += '<div class="box">✅ Cấu trúc câu và ngữ pháp chính xác!</div>';
       }
       
-      html += '<div class="box"><small>💡 Câu gợi ý chuẩn:</small><br><b>'+esc(r.natural)+'</b></div>';
+      html += '<div class="box"><small>💡 Câu gợi ý chuẩn bản ngữ:</small><br><b>'+esc(r.natural)+'</b></div>';
       $('result').innerHTML = html;
     }
   }catch(e){ $('result').innerHTML = '<div class="err">Không chấm được bài lúc này.</div>'; }
