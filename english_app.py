@@ -8,7 +8,8 @@ Mở:          http://localhost:8001
 - Ngữ pháp: chấm bằng LanguageTool (dịch vụ miễn phí, giới hạn ~20 lượt/phút)
 - Nghĩa/dịch: Google Translate miễn phí (dự phòng MyMemory)
 - IPA: dictionaryapi.dev (miễn phí)
-- Muốn thêm câu tập của riêng bạn: tạo file cau_tap.txt cùng thư mục, mỗi dòng 1 câu tiếng Việt.
+- Bài tập dịch câu bám theo TỪ BẠN VỪA TRA (câu ví dụ lấy từ từ điển, dịch sang tiếng Việt)
+- Muốn thêm câu tập chung của riêng bạn: tạo file cau_tap.txt cùng thư mục, mỗi dòng 1 câu tiếng Việt.
 """
 import argparse
 import json
@@ -78,14 +79,56 @@ def tr(text, src, dst):
     return out
 
 
+_entries = {}
+TEMPLATES = {
+    "noun": ["I saw a {w} on my way home yesterday.", "This is my favorite {w}.", "Do you have a {w}?"],
+    "verb": ["I want to {w} every day.", "She can {w} very well.", "They {w} together on weekends."],
+    "adjective": ["The room is very {w}.", "She feels {w} today.", "It looks {w} to me."],
+    "adverb": ["He speaks {w}.", "She did it {w}.", "They walked {w} to school."],
+    "other": ['I learned the word "{w}" today.', 'Can you use the word "{w}" in a sentence?'],
+}
+
+
+def fetch_entry(word):
+    """Tra từ điển miễn phí (dictionaryapi.dev): IPA, loại từ, câu ví dụ. Có nhớ kết quả."""
+    w = word.strip().lower()
+    if w in _entries:
+        return _entries[w]
+    try:
+        d = _open("https://api.dictionaryapi.dev/api/v2/entries/en/" + quote(w))[0]
+    except Exception:
+        return {}
+    _entries[w] = d
+    return d
+
+
 def get_ipa(word):
     if " " in word.strip():
         return ""
-    try:
-        d = _open("https://api.dictionaryapi.dev/api/v2/entries/en/" + quote(word.strip().lower()))[0]
-        return d.get("phonetic") or next((p["text"] for p in d.get("phonetics", []) if p.get("text")), "")
-    except Exception:
-        return ""
+    d = fetch_entry(word)
+    return d.get("phonetic") or next((p["text"] for p in d.get("phonetics", []) if p.get("text")), "")
+
+
+def exercise(word, k=0):
+    """Tạo câu luyện dịch chứa từ vừa tra: lấy câu ví dụ thật, dịch sang tiếng Việt."""
+    w = word.strip()
+    stem = w.lower()[:-1] if len(w) > 4 else w.lower()
+    d = {} if " " in w else fetch_entry(w)
+    exs, pos = [], []
+    for m in d.get("meanings", []):
+        pos.append(m.get("partOfSpeech", ""))
+        for df in m.get("definitions", []):
+            e = (df.get("example") or "").strip()
+            if e and stem in e.lower() and e not in exs:
+                exs.append(e)
+    if not exs:  # từ điển không có ví dụ -> dùng câu mẫu theo loại từ
+        exs = [t.format(w=w) for t in TEMPLATES.get(pos[0] if pos else "other", TEMPLATES["other"])]
+    en = exs[k % len(exs)]
+    en = en[0].upper() + en[1:] + ("" if en[-1] in ".!?" else ".")
+    vi = tr(en, "en", "vi")
+    if not vi:
+        return {"error": last_error or "Không dịch được"}
+    return {"word": w, "en": en, "vi": vi}
 
 
 def lookup(q):
@@ -105,13 +148,13 @@ def lt_check(text):
     return _open("https://api.languagetool.org/v2/check", data=body)["matches"]
 
 
-def grade(vi, ans):
+def grade(vi, ans, ref="", word=""):
     ans = ans.strip()
     if not ans:
         return {"error": "Bạn chưa viết câu trả lời."}
     if VI_CHARS.search(ans):
         return {"error": "Hãy viết câu trả lời bằng tiếng Anh nhé."}
-    ref = tr(vi, "vi", "en")
+    ref = ref or tr(vi, "vi", "en")
     try:
         ms = [m for m in lt_check(ans) if m["rule"]["category"]["id"] not in SKIP_CATEGORIES]
     except Exception as e:
@@ -145,7 +188,9 @@ def grade(vi, ans):
     n = len(re.findall(r"[A-Za-z']+", ans))
     grammar = max(0.0, 1 - 1.2 * len(errs) / max(n, 5))
     score = round(10 * grammar * (0.35 + 0.65 * min(1, f1 * 2)), 1)
-    return {"score": score, "segments": segs, "errors": errs, "corrected": fixed, "natural": ref}
+    stem = word.lower()[:-1] if len(word) > 4 else word.lower()
+    return {"score": score, "segments": segs, "errors": errs, "corrected": fixed, "natural": ref,
+            "word": word, "used": bool(word) and stem in ans.lower()}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -166,7 +211,9 @@ class Handler(BaseHTTPRequestHandler):
         elif u.path == "/api/lookup" and p.get("q"):
             j(lookup(p["q"]))
         elif u.path == "/api/grade" and p.get("vi"):
-            j(grade(p["vi"], p.get("answer", "")))
+            j(grade(p["vi"], p.get("answer", ""), p.get("ref", ""), p.get("word", "")))
+        elif u.path == "/api/exercise" and p.get("word"):
+            j(exercise(p["word"], int(p["k"]) if p.get("k", "").isdigit() else 0))
         elif u.path == "/api/sentences":
             j(SENTENCES)
         else:
@@ -222,7 +269,7 @@ button.stop{padding:14px 18px;font-size:1rem;border-radius:10px;border:1px solid
 </style></head>
 <body><div class="wrap">
 <h1>🔁 Lặp Từ Vựng Tiếng Anh</h1>
-<p class="desc">Gõ từ hoặc câu tiếng Anh, chọn số lần lặp, bấm Phát. Có bài tập dịch câu Việt → Anh, chấm điểm ngữ pháp.</p>
+<p class="desc">Gõ từ hoặc câu tiếng Anh, chọn số lần lặp, bấm Phát. Tra từ nào thì có bài tập dịch câu chứa từ đó, chấm điểm ngữ pháp.</p>
 
 <div class="card">
   <label for="word">Từ / cụm từ</label>
@@ -246,6 +293,10 @@ button.stop{padding:14px 18px;font-size:1rem;border-radius:10px;border:1px solid
 
 <div class="card">
   <label>✍️ Bài tập dịch câu: Việt → Anh</label>
+  <div style="display:flex;gap:8px;align-items:center;margin-bottom:10px">
+    <span style="font-size:.85rem;color:var(--sub);font-weight:600">Từ luyện:</span>
+    <select id="exWord" style="flex:1"></select>
+  </div>
   <div class="vsent" id="vi"></div>
   <textarea id="answer" rows="3" placeholder="Viết câu tiếng Anh của bạn..."></textarea>
   <div style="display:flex;gap:10px;margin-top:10px">
@@ -358,19 +409,40 @@ async function lookup(text){
     $('ipa').textContent = r.ipa || '';
     $('meaning').textContent = r.error ? '⚠️ Lỗi dịch: '+r.error : (r.meaning || '(không rõ nghĩa)');
     $('icon').textContent = r.icon;
-    if(!r.error) addLearned(r.word, r.ipa, r.meaning, r.icon);
+    if(!r.error){ addLearned(r.word, r.ipa, r.meaning, r.icon); fillExWords(r.word); exK=0; newSentence(); }
   }catch(e){ $('meaning').textContent='Không tra được nghĩa lúc này.'; }
 }
 
 // ---- Bài tập dịch câu Việt -> Anh ----
-let sentences=[], curVi='';
+let sentences=[], curVi='', curRef='', exTarget='', exK=0;
+function fillExWords(sel){
+  const cur = sel !== undefined ? sel : $('exWord').value;
+  $('exWord').innerHTML = '<option value="">📚 Câu chung (không theo từ)</option>'+
+    learned.map(w => '<option value="'+esc(w.word)+'">'+esc(w.word)+' — '+esc(w.meaning)+'</option>').join('');
+  $('exWord').value = cur;
+}
 async function newSentence(){
+  const w = $('exWord').value;
+  if(w){
+    $('vi').textContent='Đang tạo câu...'; $('result').style.display='none';
+    try{
+      const r = await (await fetch('/api/exercise?word='+encodeURIComponent(w)+'&k='+(exK++))).json();
+      if(r.error){ $('vi').textContent='⚠️ Lỗi dịch: '+r.error; return; }
+      setVi(r.vi, r.en, r.word);
+    }catch(e){ $('vi').textContent='⚠️ Không tạo được câu lúc này.'; }
+    return;
+  }
   if(!sentences.length){ try{ sentences = await (await fetch('/api/sentences')).json(); }catch(e){} }
   if(!sentences.length) return;
   let s; do{ s = sentences[Math.floor(Math.random()*sentences.length)]; }while(s===curVi && sentences.length>1);
   setVi(s);
 }
-function setVi(s){ curVi=s; $('vi').textContent='🇻🇳 '+s; $('answer').value=''; $('result').style.display='none'; }
+function setVi(s, ref, word){
+  curVi=s; curRef=ref||''; exTarget=word||'';
+  $('vi').innerHTML = '🇻🇳 '+esc(s)+(word ? '<div style="font-size:.85rem;color:var(--sub);font-weight:600;margin-top:6px">Hãy dùng từ: <span style="color:var(--accent)">'+esc(word)+'</span></div>' : '');
+  $('answer').value=''; $('result').style.display='none';
+}
+$('exWord').onchange = () => { exK = Math.floor(Math.random()*5); newSentence(); };
 $('newBtn').onclick = newSentence;
 $('customToggle').onclick = () => { const b=$('customBox'); b.style.display = b.style.display==='none'?'block':'none'; };
 $('useCustom').onclick = () => { const s=$('customVi').value.trim(); if(s){ setVi(s); $('customBox').style.display='none'; } };
@@ -379,7 +451,7 @@ $('gradeBtn').onclick = async () => {
   const btn=$('gradeBtn'); btn.disabled=true; btn.textContent='Đang chấm...';
   const box=$('result'); box.style.display='block'; box.innerHTML='<div style="color:var(--sub)">Đang chấm bài...</div>';
   try{
-    const r = await (await fetch('/api/grade?vi='+encodeURIComponent(curVi)+'&answer='+encodeURIComponent(ans))).json();
+    const r = await (await fetch('/api/grade?vi='+encodeURIComponent(curVi)+'&answer='+encodeURIComponent(ans)+'&ref='+encodeURIComponent(curRef)+'&word='+encodeURIComponent(exTarget))).json();
     if(r.error){ box.innerHTML='<div class="err">⚠️ '+esc(r.error)+'</div>'; }
     else{
       const label = r.score>=9?'Tuyệt vời! 🎉':r.score>=7?'Tốt lắm 👍':r.score>=5?'Khá ổn, cố thêm nhé':'Cần luyện thêm 💪';
@@ -392,15 +464,16 @@ $('gradeBtn').onclick = async () => {
           '<div class="err"><b>“'+esc(e.text)+'”</b> — '+esc(e.msg)+(e.fix.length?'<br>Gợi ý sửa: <b>'+e.fix.map(esc).join(' / ')+'</b>':'')+'</div>').join('')
           : '<div class="box"><small>Ngữ pháp</small>Không phát hiện lỗi ngữ pháp. ✅</div>')+
         (r.errors.length ? '<div class="box"><small>✅ Câu sau khi sửa lỗi</small>'+esc(r.corrected)+'</div>' : '')+
+        (r.word ? '<div class="box"><small>🎯 Từ luyện: '+esc(r.word)+'</small>'+(r.used?'✅ Bạn đã dùng từ này trong câu.':'⚠️ Câu của bạn chưa dùng từ này.')+'</div>' : '')+
         '<div class="box"><small>💡 Gợi ý cách viết tự nhiên hơn</small>'+esc(r.natural)+
           ' <button class="link" id="sayNat" type="button">🔊</button></div>'+
-        '<div style="font-size:.78rem;color:var(--sub);margin-top:10px;line-height:1.5">Xanh = đúng, đỏ = lỗi. Điểm là ước lượng tự động (ngữ pháp + độ sát nghĩa với bản dịch tham khảo); gợi ý tự nhiên là bản dịch máy nên chỉ để tham khảo.</div>';
+        '<div style="font-size:.78rem;color:var(--sub);margin-top:10px;line-height:1.5">Xanh = đúng, đỏ = lỗi. Điểm là ước lượng tự động (ngữ pháp + độ sát nghĩa với bản dịch tham khảo); câu gợi ý là câu mẫu từ từ điển hoặc bản dịch máy nên chỉ để tham khảo.</div>';
       $('sayNat').onclick = () => say(r.natural);
     }
   }catch(e){ box.innerHTML='<div class="err">⚠️ Không chấm được lúc này, thử lại nhé.</div>'; }
   btn.disabled=false; btn.textContent='Chấm bài';
 };
-newSentence();
+fillExWords(''); newSentence();
 
 // ---- Kiểm tra từ đã học ----
 const shuffle = a => { a=a.slice(); for(let i=a.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[a[i],a[j]]=[a[j],a[i]];} return a; };
