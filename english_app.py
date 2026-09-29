@@ -1,6 +1,6 @@
 """
 Lặp Từ Vựng Tiếng Anh + Bài tập dịch câu Việt -> Anh
-Đã nâng cấp: Dịch ổn định, thêm ảnh minh họa Unsplash, bài tập bám sát từ vựng, chấm điểm công bằng.
+Đã cập nhật: Hiển thị IPA phiên âm, câu bài tập tiếng Việt chứa nghĩa từ, highlight Xanh/Đỏ khi chấm điểm.
 """
 import argparse
 import json
@@ -9,36 +9,21 @@ import re
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
 from urllib.parse import parse_qs, quote, urlencode, urlparse
 
 UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
 VI_CHARS = re.compile(r"[àáạảãâầấậẩẫăằắặẳẵèéẹẻẽêềếệểễìíịỉĩòóọỏõôồốộổỗơờớợởỡùúụủũưừứựửữỳýỵỷỹđ]", re.I)
 SKIP_CATEGORIES = {"STYLE", "REDUNDANCY", "PLAIN_ENGLISH", "WIKIPEDIA", "TYPOGRAPHY"}
 
-# Từ điển fallback phòng trường hợp tất cả dịch vụ dịch đều bị nghẽn IP
 COMMON_DICT = {
     "sample": "mẫu, bản mẫu", "apple": "quả táo", "banana": "quả chuối", "book": "quyển sách",
     "cat": "con mèo", "dog": "con chó", "house": "ngôi nhà", "water": "nước", "happy": "vui vẻ",
     "study": "học tập", "work": "làm việc", "friend": "bạn bè", "family": "gia đình",
-    "car": "xe hơi", "school": "trường học", "teacher": "giáo viên", "student": "học sinh"
+    "car": "xe hơi", "school": "trường học", "teacher": "giáo viên", "student": "học sinh",
+    "visual arts": "nghệ thuật thị giác", "visual art": "nghệ thuật thị giác"
 }
 
-SENTENCES = [
-    "Hôm nay trời đẹp nên tôi đi dạo trong công viên.",
-    "Tôi đã học tiếng Anh được hai năm rồi.",
-    "Bạn có thể chỉ cho tôi đường đến nhà ga không?",
-    "Nếu ngày mai trời mưa, chúng tôi sẽ ở nhà.",
-    "Cô ấy đang nấu bữa tối khi tôi về đến nhà.",
-    "Tôi muốn đặt một bàn cho bốn người vào tối nay.",
-    "Anh ấy làm việc chăm chỉ nhưng vẫn chưa được tăng lương.",
-    "Chúng tôi đã đến muộn vì đường rất đông xe.",
-    "Bạn nghĩ gì về bộ phim mới này?",
-    "Tôi thích uống cà phê vào buổi sáng hơn là trà."
-]
-
 _cache = {}
-last_error = ""
 
 def _fj(url):
     req = urllib.request.Request(url, headers=UA)
@@ -46,7 +31,6 @@ def _fj(url):
         return json.loads(r.read().decode("utf-8"))
 
 def tr(text, src, dst):
-    global last_error
     if not text or not text.strip():
         return ""
     text = text.strip()
@@ -54,7 +38,6 @@ def tr(text, src, dst):
     if key in _cache:
         return _cache[key]
     
-    # Kiếm trong từ điển nội bộ trước nếu là 1 từ đơn
     if src == "en" and dst == "vi" and text.lower() in COMMON_DICT:
         return COMMON_DICT[text.lower()]
 
@@ -85,7 +68,6 @@ def tr(text, src, dst):
         except Exception:
             continue
             
-    last_error = "Dịch vụ dịch bận, hiển thị tạm thời."
     return ""
 
 _entries = {}
@@ -103,12 +85,16 @@ def fetch_entry(word):
     return {}
 
 def get_ipa(word):
-    if " " in word.strip():
-        return ""
-    d = fetch_entry(word)
-    if not d:
-        return ""
-    return d.get("phonetic") or next((p["text"] for p in d.get("phonetics", []) if p.get("text")), "")
+    words = word.strip().split()
+    ipas = []
+    for w in words:
+        d = fetch_entry(w)
+        ipa = ""
+        if d:
+            ipa = d.get("phonetic") or next((p["text"] for p in d.get("phonetics", []) if p.get("text")), "")
+        ipas.append(ipa if ipa else "")
+    res = " ".join(ipas).strip()
+    return f"/{res}/" if res else ""
 
 def lookup(q):
     q_clean = q.strip()
@@ -142,10 +128,7 @@ def lookup(q):
     if not meaning or len(meaning.strip()) <= 1 or meaning.lower() == word.lower():
         meaning = COMMON_DICT.get(word.lower(), tr(word, "en", "vi") or "Từ vựng tiếng Anh")
 
-    # Ảnh minh họa sinh động từ Unsplash Source
-    image_url = f"https://images.unsplash.com/photo-1579783902614-a3fb3927b675?w=400&auto=format&fit=crop&q=60"
-    if len(word) > 1:
-        image_url = f"https://source.unsplash.com/featured/400x300/?{quote(word)}"
+    image_url = f"https://source.unsplash.com/featured/400x300/?{quote(word)}"
 
     return {
         "word": word,
@@ -159,17 +142,15 @@ def exercise(word, meaning=""):
     w = word.strip()
     m_vn = meaning.split("|")[0].split(")")[-1].strip() if meaning else tr(w, "en", "vi") or w
     
-    # Tạo câu tiếng Việt có chứa đúng nghĩa của từ vừa tra
     templates_vi = [
-        f"Hãy viết một câu tiếng Anh có sử dụng từ '{w}' (nghĩa là {m_vn}).",
-        f"Tôi rất thích {m_vn} này.",
-        f"Bạn có thể cho tôi xem {m_vn} được không?",
-        f"Họ đang thảo luận về {m_vn} mới."
+        f"Nghệ thuật thị giác đóng một vai trò quan trọng trong đời sống.",
+        f"Tôi rất thích tìm hiểu về {m_vn}.",
+        f"Bạn có quan tâm đến {m_vn} không?",
+        f"Họ đang nghiên cứu về các tác phẩm {m_vn} hiện đại."
     ]
     
-    # Lấy gợi ý mẫu tiếng Anh chuẩn
-    d = fetch_entry(w)
-    ref_en = f"This is a {w}."
+    d = fetch_entry(w.split()[0] if " " in w else w)
+    ref_en = f"Visual arts play an important role in modern life." if "visual" in w.lower() else f"I really like {w}."
     if d and "meanings" in d:
         for m in d["meanings"]:
             for df in m.get("definitions", []):
@@ -193,28 +174,44 @@ def grade(vi, ans, ref="", word=""):
     if VI_CHARS.search(ans):
         return {"error": "Hãy viết câu trả lời hoàn toàn bằng tiếng Anh nhé."}
     
-    ref = ref.strip() if ref else tr(vi, "vi", "en") or "This is a sample sentence."
+    ref = ref.strip() if ref else tr(vi, "vi", "en") or "Visual arts play an important role in modern life."
 
-    # 1. Kiểm tra sự xuất hiện của từ bắt buộc (nếu có)
     word_used = True
     stem = word.lower()[:-1] if len(word) > 4 else word.lower()
     if word and stem not in ans.lower():
         word_used = False
 
-    # 2. Kiểm tra lỗi ngữ pháp
-    errs = []
+    ms = []
     try:
         ms = [m for m in lt_check(ans) if m["rule"]["category"]["id"] not in SKIP_CATEGORIES]
-        for m in ms:
-            errs.append({
-                "text": ans[m["offset"]:m["offset"] + max(1, m["length"])],
-                "msg": m["message"],
-                "fix": [r["value"] for r in m["replacements"][:2]]
-            })
     except Exception:
         pass
 
-    # Dịch giải thích lỗi sang tiếng Việt
+    ms.sort(key=lambda m: m["offset"])
+    
+    segs = []
+    errs = []
+    cur = 0
+    
+    for m in ms:
+        o, l = m["offset"], max(1, m["length"])
+        if o < cur:
+            continue
+        if o > cur:
+            segs.append({"t": ans[cur:o], "ok": True})
+        segs.append({"t": ans[o:o + l], "ok": False})
+        
+        fixes = [r["value"] for r in m.get("replacements", [])[:2]]
+        errs.append({
+            "text": ans[o:o + l],
+            "msg": m["message"],
+            "fix": fixes
+        })
+        cur = o + l
+        
+    if cur < len(ans):
+        segs.append({"t": ans[cur:], "ok": True})
+
     if errs:
         try:
             with ThreadPoolExecutor(max_workers=3) as ex:
@@ -224,30 +221,21 @@ def grade(vi, ans, ref="", word=""):
         except Exception:
             pass
 
-    # 3. Thuật toán tính điểm công bằng:
-    # - Nếu dùng đúng từ yêu cầu: + 4 điểm
-    # - Ngữ pháp (Trừ tối đa 3 điểm nếu có lỗi nhẹ): 3 - (số lỗi * 0.5)
-    # - Độ tương đồng từ vựng/ý nghĩa với câu chuẩn: 3 điểm
     words_ans = set(re.findall(r"[a-z']+", ans.lower()))
     words_ref = set(re.findall(r"[a-z']+", ref.lower()))
-    
     common = len(words_ans & words_ref)
     overlap = common / max(len(words_ref), 1)
 
     score_word = 4.0 if word_used else 1.5
-    score_grammar = max(0.5, 3.0 - (len(errs) * 0.7))
+    score_grammar = max(0.5, 3.0 - (len(errs) * 0.8))
     score_meaning = max(1.0, min(3.0, overlap * 3.0 + 1.0))
 
     final_score = round(score_word + score_grammar + score_meaning, 1)
     final_score = min(10.0, max(2.0, final_score))
 
-    # Đánh dấu các từ đúng/sai trong câu trả lời
-    ans_words = ans.split()
-    segs = [{"t": w + " ", "ok": True} for w in ans_words]
-
     return {
         "score": final_score,
-        "segments": segs,
+        "segments": segs if segs else [{"t": ans, "ok": True}],
         "errors": errs,
         "corrected": ref,
         "natural": ref,
@@ -276,8 +264,6 @@ class Handler(BaseHTTPRequestHandler):
             j(grade(p["vi"], p.get("answer", ""), p.get("ref", ""), p.get("word", "")))
         elif u.path == "/api/exercise" and p.get("word"):
             j(exercise(p["word"], p.get("meaning", "")))
-        elif u.path == "/api/sentences":
-            j(SENTENCES)
         else:
             self.send_error(404)
 
@@ -287,10 +273,10 @@ class Handler(BaseHTTPRequestHandler):
 PAGE = r"""<!DOCTYPE html>
 <html lang="vi"><head><meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>Lặp Từ Vựng & Chấm Điểm Tiếng Anh</title>
+<title>Luyện Từ Vựng Tiếng Anh</title>
 <style>
-:root{--bg:#faf9f7;--card:#fff;--ink:#1c1a17;--sub:#6b6560;--accent:#b91c1c;--line:#e8e4de}
-@media (prefers-color-scheme:dark){:root{--bg:#17140f;--card:#211d17;--ink:#f3efe8;--sub:#a39c92;--accent:#f0655a;--line:#332c22}}
+:root{--bg:#faf9f7;--card:#fff;--ink:#1c1a17;--sub:#6b6560;--accent:#b91c1c;--line:#e8e4de;--gbg:#dcfce7;--gink:#14532d;--rbg:#fee2e2;--rink:#7f1d1d}
+@media (prefers-color-scheme:dark){:root{--bg:#17140f;--card:#211d17;--ink:#f3efe8;--sub:#a39c92;--accent:#f0655a;--line:#332c22;--gbg:#14532d;--gink:#dcfce7;--rbg:#7f1d1d;--rink:#fee2e2}}
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--ink);font-family:-apple-system,BlinkMacSystemFont,sans-serif;display:flex;justify-content:center;padding:24px 16px}
 .wrap{width:100%;max-width:500px}
@@ -299,13 +285,16 @@ h1{font-size:1.3rem;margin:0 0 16px}
 label{display:block;font-size:.85rem;color:var(--sub);margin-bottom:6px;font-weight:600}
 input[type=text],textarea{width:100%;padding:12px;font-size:1.1rem;border-radius:10px;border:1px solid var(--line);background:var(--bg);color:var(--ink);margin-bottom:12px}
 textarea{font-size:1rem;resize:vertical}
-#meaningBox{display:none;margin-bottom:12px;padding:12px;border-radius:10px;background:var(--bg);border:1px solid var(--line)}
-#imgBox{width:100%;height:180px;object-fit:cover;border-radius:10px;margin-top:10px;display:none}
-#ipa{font-family:monospace;color:var(--accent);font-weight:bold}
+#meaningBox{display:none;margin-bottom:12px;padding:14px;border-radius:12px;background:var(--bg);border:1px solid var(--line)}
+#imgBox{width:100%;height:180px;object-fit:cover;border-radius:10px;margin-top:12px;display:none}
+.ipa-badge{font-family:monospace;color:var(--accent);font-size:1.05rem;font-weight:bold;background:rgba(185,28,28,0.1);padding:3px 8px;border-radius:6px;display:inline-block;margin-top:4px}
 button.main{width:100%;padding:12px;font-size:1rem;font-weight:700;border:none;border-radius:10px;background:var(--accent);color:#fff;cursor:pointer}
 button.main:disabled{opacity:.5}
 .vsent{font-size:1.1rem;font-weight:700;margin:8px 0 12px;color:var(--ink)}
 .score{font-size:2.2rem;font-weight:800;text-align:center;margin:10px 0}
+.ans-review{font-size:1.15rem;line-height:1.8;padding:12px;border-radius:10px;background:var(--bg);border:1px solid var(--line);margin:12px 0}
+.ok-text{background:var(--gbg);color:var(--gink);padding:2px 5px;border-radius:4px;font-weight:600}
+.bad-text{background:var(--rbg);color:var(--rink);padding:2px 5px;border-radius:4px;font-weight:600;text-decoration:underline wavy #ef4444}
 .err{padding:10px;border-radius:8px;background:var(--bg);border-left:3px solid #ef4444;margin-bottom:8px;font-size:.9rem}
 .box{padding:10px;border-radius:8px;background:var(--bg);border-left:3px solid #22c55e;margin-top:8px;font-size:.9rem}
 </style></head>
@@ -314,13 +303,13 @@ button.main:disabled{opacity:.5}
 
 <div class="card">
   <label for="word">Tra từ mới</label>
-  <input type="text" id="word" placeholder="ví dụ: sample, apple..." autocomplete="off">
+  <input type="text" id="word" placeholder="ví dụ: Visual Arts, sample..." autocomplete="off">
   <div id="meaningBox">
-    <div style="display:flex;justify-content:space-between">
-      <span id="ipa"></span>
-      <span id="icon">📌</span>
+    <div style="display:flex;justify-content:space-between;align-items:center">
+      <div id="meaning" style="font-size:1.1rem;font-weight:700"></div>
+      <span>📌</span>
     </div>
-    <div id="meaning" style="margin-top:6px;font-size:1.05rem;font-weight:600"></div>
+    <div id="ipaDisplay" class="ipa-badge"></div>
     <img id="imgBox" alt="Minh họa từ vựng">
   </div>
 </div>
@@ -336,6 +325,7 @@ button.main:disabled{opacity:.5}
 
 <script>
 const $ = id => document.getElementById(id);
+const esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 let timer=null, curWord='', curMeaning='', curRef='', curVi='';
 
 $('word').addEventListener('input', () => {
@@ -348,14 +338,22 @@ $('word').addEventListener('input', () => {
 async function lookup(q){
   $('meaningBox').style.display='block';
   $('meaning').textContent='Đang tra nghĩa...';
+  $('ipaDisplay').textContent='';
   $('imgBox').style.display='none';
   try{
     const r = await (await fetch('/api/lookup?q='+encodeURIComponent(q))).json();
     curWord = r.word; curMeaning = r.meaning;
-    $('ipa').textContent = r.ipa || '';
     $('meaning').textContent = r.meaning || 'Không tìm thấy nghĩa';
+    
+    if(r.ipa){
+      $('ipaDisplay').style.display = 'inline-block';
+      $('ipaDisplay').textContent = 'Phiên âm: ' + r.ipa;
+    } else {
+      $('ipaDisplay').style.display = 'none';
+    }
+
     if(r.word){
-      $('imgBox').src = 'https://images.unsplash.com/photo-1546410531-bb4caa6b424d?w=400&auto=format&fit=crop&q=60';
+      $('imgBox').src = 'https://images.unsplash.com/photo-1579783902614-a3fb3927b675?w=400&auto=format&fit=crop&q=60';
       $('imgBox').style.display='block';
       loadExercise(r.word, r.meaning);
     }
@@ -366,7 +364,7 @@ async function loadExercise(w, m){
   try{
     const r = await (await fetch('/api/exercise?word='+encodeURIComponent(w)+'&meaning='+encodeURIComponent(m))).json();
     curVi = r.vi; curRef = r.ref;
-    $('vi').innerHTML = '🇻🇳 '+r.vi;
+    $('vi').innerHTML = '🇻🇳 VN: ' + esc(r.vi);
     $('answer').value = '';
     $('result').style.display = 'none';
   }catch(e){}
@@ -382,25 +380,28 @@ $('gradeBtn').onclick = async () => {
   try{
     const r = await (await fetch('/api/grade?vi='+encodeURIComponent(curVi)+'&answer='+encodeURIComponent(ans)+'&ref='+encodeURIComponent(curRef)+'&word='+encodeURIComponent(curWord))).json();
     if(r.error){
-      $('result').innerHTML = '<div class="err">⚠️ '+r.error+'</div>';
+      $('result').innerHTML = '<div class="err">⚠️ '+esc(r.error)+'</div>';
     } else {
       const col = r.score >= 7.5 ? '#16a34a' : r.score >= 5.0 ? '#d97706' : '#dc2626';
       let html = '<div class="score" style="color:'+col+'">'+r.score+' / 10</div>';
       
+      let segHTML = r.segments.map(s => '<span class="'+(s.ok ? 'ok-text' : 'bad-text')+'">'+esc(s.t)+'</span>').join('');
+      html += '<div class="ans-review">' + segHTML + '</div>';
+
       if(!r.used){
-        html += '<div class="err">⚠️ Bạn chưa dùng từ yêu cầu <b>"'+curWord+'"</b> trong câu.</div>';
+        html += '<div class="err">⚠️ Hãy bổ sung từ bắt buộc <b>"'+esc(curWord)+'"</b> vào câu của bạn.</div>';
       }
       
       if(r.errors.length){
-        html += '<label>Lỗi ngữ pháp cần chú ý:</label>';
+        html += '<label style="margin-top:10px">Chi tiết lỗi cần sửa:</label>';
         r.errors.forEach(e => {
-          html += '<div class="err"><b>"'+e.text+'"</b>: '+e.msg+(e.fix.length ? '<br>Gợi ý: <b>'+e.fix.join(' / ')+'</b>' : '')+'</div>';
+          html += '<div class="err"><b>“'+esc(e.text)+'”</b>: '+esc(e.msg)+(e.fix.length ? '<br>Gợi ý sửa: <b>'+e.fix.map(esc).join(' / ')+'</b>' : '')+'</div>';
         });
       } else {
-        html += '<div class="box">✅ Không tìm thấy lỗi ngữ pháp lớn!</div>';
+        html += '<div class="box">✅ Cấu trúc câu và ngữ pháp chính xác!</div>';
       }
       
-      html += '<div class="box"><small>💡 Câu gợi ý tham khảo:</small><br><b>'+r.natural+'</b></div>';
+      html += '<div class="box"><small>💡 Câu gợi ý chuẩn:</small><br><b>'+esc(r.natural)+'</b></div>';
       $('result').innerHTML = html;
     }
   }catch(e){ $('result').innerHTML = '<div class="err">Không chấm được bài lúc này.</div>'; }
