@@ -1,36 +1,63 @@
 def lookup(q):
-    q_clean = q.strip()
+    """Tra từ tiếng Anh hoặc dịch nghĩa tiếng Việt sang tiếng Anh.
+
+    Hàm này cần các thành phần được định nghĩa ở nơi khác trong ứng dụng:
+    VI_CHARS, tr(), fetch_entry(), get_ipa().
+    """
+    q_clean = (q or "").strip()
+
     if not q_clean:
-        return {"word": "", "ipa": "", "meaning": "", "icon": "📌"}
-        
+        return {
+            "word": "",
+            "ipa": "",
+            "meaning": "",
+            "icon": "📌",
+        }
+
     if VI_CHARS.search(q_clean):
-        word = tr(q_clean, "vi", "en") or q_clean
+        # Người dùng nhập tiếng Việt: dịch sang tiếng Anh để làm từ mục tiêu.
+        word = (tr(q_clean, "vi", "en") or "").strip() or q_clean
         meaning = q_clean
     else:
         word = q_clean
-        d = fetch_entry(word)
+        entry = fetch_entry(word)
         meanings_list = []
-        
-        if d and isinstance(d, list) and len(d) > 0 and "meanings" in d[0]:
-            for m in d[0]["meanings"]:
-                pos = m.get("partOfSpeech", "")
-                defs = m.get("definitions", [])
-                if defs:
-                    def_en = defs[0].get("definition", "")
-                    if def_en:
-                        def_vi = tr(def_en, "en", "vi")
-                        if def_vi and len(def_vi) > 2:
-                            meanings_list.append(f"({pos}) {def_vi}")
-                            
+
+        # Dictionary API thường trả về một danh sách các mục từ.
+        if isinstance(entry, list) and entry:
+            meanings = entry[0].get("meanings", [])
+            for item in meanings:
+                pos = item.get("partOfSpeech", "")
+                definitions = item.get("definitions", [])
+
+                if not definitions:
+                    continue
+
+                definition_en = (definitions[0].get("definition") or "").strip()
+                if not definition_en:
+                    continue
+
+                definition_vi = (tr(definition_en, "en", "vi") or "").strip()
+                if definition_vi and len(definition_vi) > 2:
+                    meanings_list.append(f"({pos}) {definition_vi}" if pos else definition_vi)
+
         if meanings_list:
             meaning = " | ".join(meanings_list)
         else:
-            # Fallback dịch trực tiếp từ sang tiếng Việt nếu không lấy được định nghĩa
-            meaning = tr(word, "en", "vi")
+            # Dự phòng: dịch trực tiếp từ/cụm từ sang tiếng Việt.
+            meaning = (tr(word, "en", "vi") or "").strip()
 
-    # Nếu vẫn rỗng hoặc chỉ có vài ký tự lỗi, ép dịch lại trực tiếp
     if not meaning or len(meaning.strip()) <= 2:
-        meaning = tr(word, "en", "vi") or "Chưa lấy được nghĩa lúc này"
+        meaning = (tr(word, "en", "vi") or "").strip() or "Chưa lấy được nghĩa lúc này"
 
-    r = {"word": word, "ipa": get_ipa(word), "meaning": meaning, "icon": "📌"}
-    return r
+    try:
+        ipa = get_ipa(word) or ""
+    except Exception:
+        ipa = ""
+
+    return {
+        "word": word,
+        "ipa": ipa,
+        "meaning": meaning,
+        "icon": "📌",
+    }
