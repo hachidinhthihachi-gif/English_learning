@@ -1,6 +1,6 @@
 """
-Lặp Từ Vựng Tiếng Anh + Bài tập dịch câu Việt -> Anh
-Đã cập nhật: Hiển thị IPA phiên âm, câu bài tập tiếng Việt chứa nghĩa từ, highlight Xanh/Đỏ khi chấm điểm.
+Luyện Từ Vựng Tiếng Anh + Bài tập dịch câu Việt -> Anh
+Cập nhật: Dùng Icon thay cho hình ảnh (load siêu nhanh) & Thêm hướng dẫn cách phát âm / học từ.
 """
 import argparse
 import json
@@ -84,7 +84,7 @@ def fetch_entry(word):
         pass
     return {}
 
-def get_ipa(word):
+def get_ipa_and_guide(word):
     words = word.strip().split()
     ipas = []
     for w in words:
@@ -93,13 +93,34 @@ def get_ipa(word):
         if d:
             ipa = d.get("phonetic") or next((p["text"] for p in d.get("phonetics", []) if p.get("text")), "")
         ipas.append(ipa if ipa else "")
-    res = " ".join(ipas).strip()
-    return f"/{res}/" if res else ""
+    
+    ipa_str = " ".join(ipas).strip()
+    ipa_res = f"/{ipa_str}/" if ipa_str else ""
+    
+    # Hướng dẫn mẹo phát âm & nhấn trọng âm
+    if "ˈ" in ipa_res:
+        guide = "💡 Trọng âm rơi vào âm tiết đứng ngay sau dấu [ ˈ ]. Hãy đọc âm đó to và rõ hơn."
+    elif len(words) > 1:
+        guide = "💡 Cụm từ gồm nhiều từ: Đọc lướt nối âm nhẹ giữa các từ, giữ nguyên ngữ điệu câu."
+    else:
+        guide = "💡 Phát âm rõ phụ âm cuối (nếu có) để chuẩn giọng bản ngữ."
+
+    return ipa_res, guide
+
+def get_icon(word):
+    w = word.lower()
+    if any(k in w for k in ["art", "draw", "paint", "visual"]): return "🎨"
+    if any(k in w for k in ["music", "sing", "song"]): return "🎵"
+    if any(k in w for k in ["book", "read", "study"]): return "📚"
+    if any(k in w for k in ["food", "eat", "apple", "banana"]): return "🍎"
+    if any(k in w for k in ["tech", "code", "computer"]): return "💻"
+    if any(k in w for k in ["car", "drive", "travel"]): return "🚗"
+    return "📌"
 
 def lookup(q):
     q_clean = q.strip()
     if not q_clean:
-        return {"word": "", "ipa": "", "meaning": "", "image": "", "icon": "📌"}
+        return {"word": "", "ipa": "", "guide": "", "meaning": "", "icon": "📌"}
 
     if VI_CHARS.search(q_clean):
         word = tr(q_clean, "vi", "en") or q_clean
@@ -128,14 +149,14 @@ def lookup(q):
     if not meaning or len(meaning.strip()) <= 1 or meaning.lower() == word.lower():
         meaning = COMMON_DICT.get(word.lower(), tr(word, "en", "vi") or "Từ vựng tiếng Anh")
 
-    image_url = f"https://source.unsplash.com/featured/400x300/?{quote(word)}"
+    ipa, guide = get_ipa_and_guide(word)
 
     return {
         "word": word,
-        "ipa": get_ipa(word),
+        "ipa": ipa,
+        "guide": guide,
         "meaning": meaning,
-        "image": image_url,
-        "icon": "📌"
+        "icon": get_icon(word)
     }
 
 def exercise(word, meaning=""):
@@ -286,8 +307,9 @@ label{display:block;font-size:.85rem;color:var(--sub);margin-bottom:6px;font-wei
 input[type=text],textarea{width:100%;padding:12px;font-size:1.1rem;border-radius:10px;border:1px solid var(--line);background:var(--bg);color:var(--ink);margin-bottom:12px}
 textarea{font-size:1rem;resize:vertical}
 #meaningBox{display:none;margin-bottom:12px;padding:14px;border-radius:12px;background:var(--bg);border:1px solid var(--line)}
-#imgBox{width:100%;height:180px;object-fit:cover;border-radius:10px;margin-top:12px;display:none}
-.ipa-badge{font-family:monospace;color:var(--accent);font-size:1.05rem;font-weight:bold;background:rgba(185,28,28,0.1);padding:3px 8px;border-radius:6px;display:inline-block;margin-top:4px}
+.icon-badge{font-size:2.5rem;text-align:center;margin:8px 0}
+.ipa-badge{font-family:monospace;color:var(--accent);font-size:1.05rem;font-weight:bold;background:rgba(185,28,28,0.1);padding:4px 8px;border-radius:6px;display:inline-block;margin-top:6px}
+.pron-guide{font-size:.85rem;color:var(--sub);margin-top:6px;font-style:italic;line-height:1.4}
 button.main{width:100%;padding:12px;font-size:1rem;font-weight:700;border:none;border-radius:10px;background:var(--accent);color:#fff;cursor:pointer}
 button.main:disabled{opacity:.5}
 .vsent{font-size:1.1rem;font-weight:700;margin:8px 0 12px;color:var(--ink)}
@@ -307,10 +329,11 @@ button.main:disabled{opacity:.5}
   <div id="meaningBox">
     <div style="display:flex;justify-content:space-between;align-items:center">
       <div id="meaning" style="font-size:1.1rem;font-weight:700"></div>
-      <span>📌</span>
+      <span id="headerIcon" style="font-size:1.2rem">📌</span>
     </div>
+    <div id="iconDisplay" class="icon-badge">📌</div>
     <div id="ipaDisplay" class="ipa-badge"></div>
-    <img id="imgBox" alt="Minh họa từ vựng">
+    <div id="guideDisplay" class="pron-guide"></div>
   </div>
 </div>
 
@@ -332,18 +355,19 @@ $('word').addEventListener('input', () => {
   clearTimeout(timer);
   const q = $('word').value.trim();
   if(!q){ $('meaningBox').style.display='none'; return; }
-  timer = setTimeout(() => lookup(q), 500);
+  timer = setTimeout(() => lookup(q), 300);
 });
 
 async function lookup(q){
   $('meaningBox').style.display='block';
   $('meaning').textContent='Đang tra nghĩa...';
   $('ipaDisplay').textContent='';
-  $('imgBox').style.display='none';
+  $('guideDisplay').textContent='';
   try{
     const r = await (await fetch('/api/lookup?q='+encodeURIComponent(q))).json();
     curWord = r.word; curMeaning = r.meaning;
     $('meaning').textContent = r.meaning || 'Không tìm thấy nghĩa';
+    $('iconDisplay').textContent = r.icon || '📌';
     
     if(r.ipa){
       $('ipaDisplay').style.display = 'inline-block';
@@ -352,9 +376,11 @@ async function lookup(q){
       $('ipaDisplay').style.display = 'none';
     }
 
+    if(r.guide){
+      $('guideDisplay').textContent = r.guide;
+    }
+
     if(r.word){
-      $('imgBox').src = 'https://images.unsplash.com/photo-1579783902614-a3fb3927b675?w=400&auto=format&fit=crop&q=60';
-      $('imgBox').style.display='block';
       loadExercise(r.word, r.meaning);
     }
   }catch(e){ $('meaning').textContent='Lỗi tra từ, thử lại sau.'; }
